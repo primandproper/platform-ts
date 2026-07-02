@@ -1,0 +1,42 @@
+{
+  "name": "@primandproper/distributedlock",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Server-only distributed locking: acquire/release/refresh with swappable providers.",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/primandproper/platform-ts.git",
+    "directory": "packages/distributedlock"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "node": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@primandproper/database": "workspace:*",
+    "@primandproper/errors": "workspace:*",
+    "@primandproper/observability": "workspace:*",
+    "ioredis": "5.11.1",
+    "zod": "3.25.76"
+  }
+}

@@ -1,0 +1,10 @@
+packages:
+  - "packages/*"
+
+# Security supply-chain delay: never install a dependency version (including transitive)
+# published less than 7 days (10080 minutes) ago. Requires pnpm >= 10.16.0.
+# https://pnpm.io/settings#minimumreleaseage
+minimumReleaseAge: 10080
+
+# Pin exact versions on `pnpm add` (no ^ or ~), matching the manually pinned manifests.
+savePrefix: ""

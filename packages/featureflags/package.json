@@ -1,0 +1,44 @@
+{
+  "name": "@primandproper/featureflags",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Server-only feature flags: a FeatureFlagManager interface with typed evaluation and swappable OpenFeature-backed providers.",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/primandproper/platform-ts.git",
+    "directory": "packages/featureflags"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "node": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@launchdarkly/node-server-sdk": "9.11.3",
+    "@launchdarkly/openfeature-node-server": "1.2.0",
+    "@openfeature/server-sdk": "1.22.0",
+    "@opentelemetry/api": "1.9.1",
+    "@primandproper/observability": "workspace:*",
+    "@tapico/node-openfeature-posthog": "1.1.4",
+    "zod": "3.25.76"
+  }
+}

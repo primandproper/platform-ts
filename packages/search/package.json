@@ -1,0 +1,44 @@
+{
+  "name": "@primandproper/search",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Server-only search: text and vector index/search interfaces with swappable providers.",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/primandproper/platform-ts.git",
+    "directory": "packages/search"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "node": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@elastic/elasticsearch": "8.19.1",
+    "@primandproper/circuitbreaking": "workspace:*",
+    "@primandproper/errors": "workspace:*",
+    "@primandproper/observability": "workspace:*",
+    "algoliasearch": "5.55.0",
+    "typesense": "3.0.6",
+    "zod": "3.25.76"
+  }
+}

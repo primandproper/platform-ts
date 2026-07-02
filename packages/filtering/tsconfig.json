@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // DOM is included only for the universal web globals (URL, URLSearchParams,
+    // Request); no DOM API is used.
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src"]
+}

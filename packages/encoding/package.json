@@ -1,0 +1,42 @@
+{
+  "name": "@primandproper/encoding",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Universal multi-format encoding: an Encoder/ServerEncoderDecoder over JSON, YAML, XML, and TOML.",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/primandproper/platform-ts.git",
+    "directory": "packages/encoding"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@primandproper/errors": "workspace:*",
+    "@primandproper/observability": "workspace:*",
+    "fast-xml-parser": "5.9.3",
+    "smol-toml": "1.7.0",
+    "yaml": "2.9.0",
+    "zod": "3.25.76"
+  }
+}

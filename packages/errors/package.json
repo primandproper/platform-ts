@@ -1,0 +1,34 @@
+{
+  "name": "@primandproper/errors",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Universal error utilities: message extraction, prefixed wrapping, and a typed PlatformError base.",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/primandproper/platform-ts.git",
+    "directory": "packages/errors"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "clean": "rm -rf dist .turbo"
+  }
+}

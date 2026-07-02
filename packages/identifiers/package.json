@@ -1,0 +1,39 @@
+{
+  "name": "@primandproper/identifiers",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Universal unique ID generation + validation (nanoid random, ulid sortable).",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/primandproper/platform-ts.git",
+    "directory": "packages/identifiers"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "nanoid": "5.1.16",
+    "ulid": "3.0.2",
+    "zod": "3.25.76"
+  }
+}

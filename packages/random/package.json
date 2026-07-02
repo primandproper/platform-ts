@@ -1,0 +1,48 @@
+{
+  "name": "@primandproper/random",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Isomorphic cryptographically secure random generation (hex, base32, base64url) over WebCrypto with swappable providers.",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/primandproper/platform-ts.git",
+    "directory": "packages/random"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "exports": {
+    ".": {
+      "browser": {
+        "types": "./dist/index.browser.d.ts",
+        "default": "./dist/index.browser.js"
+      },
+      "node": {
+        "types": "./dist/index.node.d.ts",
+        "default": "./dist/index.node.js"
+      },
+      "default": {
+        "types": "./dist/index.node.d.ts",
+        "default": "./dist/index.node.js"
+      }
+    }
+  },
+  "types": "./dist/index.node.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@primandproper/observability": "workspace:*",
+    "zod": "3.25.76"
+  }
+}

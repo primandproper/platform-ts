@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // DOM is included only for the universal timer globals (setTimeout); no DOM API is used.
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src"]
+}

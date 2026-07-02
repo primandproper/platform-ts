@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // DOM is included for the web-standard globals this package uses (TextEncoder/TextDecoder,
+    // Request/Response); no Node built-ins, so the package stays Universal.
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src"]
+}

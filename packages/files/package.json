@@ -1,0 +1,40 @@
+{
+  "name": "@primandproper/files",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Server-only filesystem helpers: line iteration, chunking, slicing, and typed decode.",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/primandproper/platform-ts.git",
+    "directory": "packages/files"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "node": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@primandproper/encoding": "workspace:*",
+    "@primandproper/errors": "workspace:*",
+    "@primandproper/observability": "workspace:*"
+  }
+}
