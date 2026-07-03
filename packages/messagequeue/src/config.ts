@@ -1,46 +1,100 @@
 import { z } from "zod";
 
-/** In-memory-provider config. No tuning yet; present for symmetry and future options. */
+/** In-process-broker config. No tuning; present for symmetry. */
 export const MemoryMessageQueueConfigSchema = z.object({});
-
 export type MemoryMessageQueueConfig = z.infer<typeof MemoryMessageQueueConfigSchema>;
 
-/** Redis-Streams-provider config: a single-node Redis reached via ioredis. */
+/** Redis PUB/SUB config. Faithful to Go's `redis.Config`. */
 export const RedisMessageQueueConfigSchema = z.object({
-  url: z.string().url(),
-  keyPrefix: z.string().default(""),
-  /** How long each blocking read parks waiting for new messages, in milliseconds. */
-  blockMs: z.number().int().positive().default(5_000),
-  /** Maximum number of messages pulled per read. */
-  batchSize: z.number().int().positive().default(16),
+  /** One or more `host:port` addresses; more than one selects a cluster client. */
+  queueAddresses: z.array(z.string()).min(1),
+  username: z.string().optional(),
+  password: z.string().optional(),
 });
-
 export type RedisMessageQueueConfig = z.infer<typeof RedisMessageQueueConfigSchema>;
 
+/** Amazon SQS config. Faithful to Go's `sqs.Config` (topic = queue URL); AWS creds resolve ambiently. */
+export const SQSMessageQueueConfigSchema = z.object({
+  region: z.string().optional(),
+  endpoint: z.string().url().optional(),
+  credentials: z
+    .object({
+      accessKeyId: z.string(),
+      secretAccessKey: z.string(),
+      sessionToken: z.string().optional(),
+    })
+    .optional(),
+});
+export type SQSMessageQueueConfig = z.infer<typeof SQSMessageQueueConfigSchema>;
+
+/** GCP Pub/Sub config. Faithful to Go's `pubsub.Config`. */
+export const PubSubMessageQueueConfigSchema = z.object({
+  projectId: z.string().min(1),
+});
+export type PubSubMessageQueueConfig = z.infer<typeof PubSubMessageQueueConfigSchema>;
+
+/** Kafka config. Faithful to Go's `kafka.Config`. */
+export const KafkaMessageQueueConfigSchema = z.object({
+  brokers: z.array(z.string()).min(1),
+  groupId: z.string().default(""),
+});
+export type KafkaMessageQueueConfig = z.infer<typeof KafkaMessageQueueConfigSchema>;
+
+/** The set of message-queue providers. Mirrors Go's `provider` constants plus TS-only `memory`. */
+export const MESSAGE_QUEUE_PROVIDERS = [
+  "memory",
+  "redis",
+  "sqs",
+  "pubsub",
+  "kafka",
+  "noop",
+] as const;
+
 /**
- * Message-queue config. Replaces the Go `env:`-tagged struct + ozzo `ValidateWithContext`.
- * `memory` (default) is a real in-process pub/sub; `noop` drops everything; `redis` (Redis
- * Streams, one consumer group per subscriber) gives durable cross-process fan-out and stays
- * server-side.
- *
- * Google Pub/Sub, AWS SQS, and Kafka are intended future providers — each needs its own SDK
- * and stays server-side, so they are deliberately not implemented here.
+ * Selects and configures a provider for one role (publishing or consuming). Replaces the Go
+ * `env:`-tagged `MessageQueueConfig` + ozzo `ValidateWithContext`. A process that publishes to one
+ * backend and consumes from another simply builds each role from its own config — more flexible
+ * than Go's fixed `Config{Consumer, Publisher}` wrapper, and the same switch under the hood.
  */
 export const MessageQueueConfigSchema = z
   .object({
-    provider: z.enum(["memory", "redis", "noop"]).default("memory"),
+    provider: z.enum(MESSAGE_QUEUE_PROVIDERS).default("memory"),
     memory: MemoryMessageQueueConfigSchema.optional(),
     redis: RedisMessageQueueConfigSchema.optional(),
+    sqs: SQSMessageQueueConfigSchema.optional(),
+    pubsub: PubSubMessageQueueConfigSchema.optional(),
+    kafka: KafkaMessageQueueConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
-    if (cfg.provider === "redis" && cfg.redis === undefined) {
+    const required: Record<string, unknown> = {
+      redis: cfg.redis,
+      pubsub: cfg.pubsub,
+      kafka: cfg.kafka,
+    };
+    const missing = required[cfg.provider];
+    if (cfg.provider in required && missing === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["redis"],
-        message: "redis config is required when provider is 'redis'",
+        path: [cfg.provider],
+        message: `${cfg.provider} config is required when provider is '${cfg.provider}'`,
       });
     }
   });
 
 export type MessageQueueConfig = z.infer<typeof MessageQueueConfigSchema>;
 export type MessageQueueConfigInput = z.input<typeof MessageQueueConfigSchema>;
+
+/**
+ * The platform's queue names. Faithful to Go's `QueuesConfig`; every name is required so a
+ * misconfigured deployment fails fast rather than publishing to an empty topic.
+ */
+export const QueuesConfigSchema = z.object({
+  dataChangesTopicName: z.string().min(1),
+  outboundEmailsTopicName: z.string().min(1),
+  searchIndexRequestsTopicName: z.string().min(1),
+  mobileNotificationsTopicName: z.string().min(1),
+  userDataAggregationTopicName: z.string().min(1),
+  webhookExecutionRequestsTopicName: z.string().min(1),
+});
+export type QueuesConfig = z.infer<typeof QueuesConfigSchema>;
+export type QueuesConfigInput = z.input<typeof QueuesConfigSchema>;

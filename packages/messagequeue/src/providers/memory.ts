@@ -1,78 +1,223 @@
-import { randomUUID } from "node:crypto";
-
 import {
   makeObserver,
-  type Logger,
   type ObservabilityDeps,
   type Observer,
 } from "@primandproper/observability";
 
-import type {
-  Message,
-  MessageHandler,
-  MessageQueue,
-  OutgoingMessage,
-  Subscription,
+import {
+  ErrEmptyTopicName,
+  type Consumer,
+  type ConsumerFunc,
+  type ConsumerProvider,
+  type Publisher,
+  type PublisherProvider,
 } from "../messagequeue.js";
 
-const o11yName = "messagequeue";
+import {
+  consumedCounter,
+  encodeJSON,
+  LENGTH_KEY,
+  publisherInstruments,
+  TOPIC_KEY,
+  TopicCache,
+  type PublisherInstruments,
+} from "./support.js";
 
 /**
- * An in-process pub/sub {@link MessageQueue}. `publish` fans out synchronously to every
- * subscriber of the topic and awaits each handler, so delivery is observable in the same
- * tick — ideal for tests and single-process apps. No cross-process or durable semantics.
+ * An in-process pub/sub broker. Not present in platform-go — it exists so the same
+ * {@link PublisherProvider}/{@link ConsumerProvider} contract runs with zero infrastructure in
+ * tests and single-process apps. A publisher and consumer built against the *same* broker exchange
+ * messages; the {@link provideMemoryPublisherProvider}/{@link provideMemoryConsumerProvider}
+ * factories default to a shared module-level broker so the config-driven factory "just works".
  */
-export class MemoryMessageQueue implements MessageQueue {
-  readonly #handlers = new Map<string, Set<MessageHandler>>();
-  readonly #observer: Observer;
-  readonly #logger: Logger;
+export class MemoryBroker {
+  readonly #subscribers = new Map<string, Set<ConsumerFunc>>();
 
-  constructor(deps: ObservabilityDeps = {}) {
-    this.#observer = deps.observer ?? makeObserver(o11yName, deps);
-    this.#logger = this.#observer.logger();
-  }
-
-  async publish(topic: string, message: OutgoingMessage): Promise<void> {
-    const full: Message = {
-      id: message.id ?? randomUUID(),
-      body: message.body,
-      ...(message.attributes === undefined ? {} : { attributes: message.attributes }),
-    };
-
-    const handlers = this.#handlers.get(topic);
-    if (handlers === undefined || handlers.size === 0) {
-      this.#logger.debug("no subscribers for topic");
-      return;
-    }
-
-    for (const handler of [...handlers]) {
-      await handler(full);
-    }
-  }
-
-  subscribe(topic: string, handler: MessageHandler): Promise<Subscription> {
-    let handlers = this.#handlers.get(topic);
+  subscribe(topic: string, handler: ConsumerFunc): () => void {
+    let handlers = this.#subscribers.get(topic);
     if (handlers === undefined) {
-      handlers = new Set<MessageHandler>();
-      this.#handlers.set(topic, handlers);
+      handlers = new Set<ConsumerFunc>();
+      this.#subscribers.set(topic, handlers);
     }
     handlers.add(handler);
 
-    const unsubscribe = (): Promise<void> => {
-      const current = this.#handlers.get(topic);
+    return () => {
+      const current = this.#subscribers.get(topic);
       if (current !== undefined) {
         current.delete(handler);
         if (current.size === 0) {
-          this.#handlers.delete(topic);
+          this.#subscribers.delete(topic);
         }
       }
-      return Promise.resolve();
     };
+  }
 
-    return Promise.resolve({ unsubscribe });
+  async publish(topic: string, data: Uint8Array): Promise<void> {
+    const handlers = this.#subscribers.get(topic);
+    if (handlers === undefined) {
+      return;
+    }
+    // Snapshot so a handler that (un)subscribes mid-fan-out doesn't mutate the live set.
+    for (const handler of [...handlers]) {
+      await handler(data);
+    }
+  }
+}
+
+/** The broker the factory wires when no explicit broker is supplied. */
+const defaultBroker = new MemoryBroker();
+
+class MemoryPublisher implements Publisher {
+  readonly #broker: MemoryBroker;
+  readonly #topic: string;
+  readonly #observer: Observer;
+  readonly #instruments: PublisherInstruments;
+
+  constructor(broker: MemoryBroker, topic: string, deps?: ObservabilityDeps) {
+    this.#broker = broker;
+    this.#topic = topic;
+    this.#observer = makeObserver(`${topic}_publisher`, deps);
+    this.#instruments = publisherInstruments(deps, topic);
+  }
+
+  async publish(data: unknown): Promise<void> {
+    await this.#observer.run("publish", async (op) => {
+      let bytes: Uint8Array;
+      try {
+        bytes = encodeJSON(data);
+      } catch (err) {
+        this.#instruments.publishErrors.add(1);
+        throw op.error(err, "encoding topic message");
+      }
+      op.set(TOPIC_KEY, this.#topic).set(LENGTH_KEY, bytes.length);
+      await this.#broker.publish(this.#topic, bytes);
+      this.#instruments.published.add(1);
+    });
+  }
+
+  publishAsync(data: unknown): void {
+    this.publish(data).catch((err: unknown) => {
+      this.#observer.logger().error("publishing message", err);
+    });
+  }
+
+  stop(): void {}
+}
+
+/** A {@link PublisherProvider} backed by an in-process {@link MemoryBroker}. */
+export class MemoryPublisherProvider implements PublisherProvider {
+  readonly #broker: MemoryBroker;
+  readonly #deps: ObservabilityDeps | undefined;
+  readonly #cache = new TopicCache<Publisher>();
+
+  constructor(broker: MemoryBroker = defaultBroker, deps?: ObservabilityDeps) {
+    this.#broker = broker;
+    this.#deps = deps;
+  }
+
+  providePublisher(topic: string): Promise<Publisher> {
+    if (topic === "") {
+      return Promise.reject(ErrEmptyTopicName);
+    }
+    return this.#cache.getOrBuild(topic, () =>
+      Promise.resolve(new MemoryPublisher(this.#broker, topic, this.#deps)),
+    );
   }
 
   ping(): Promise<void> {
     return Promise.resolve();
   }
+
+  close(): void {
+    this.#cache.clear();
+  }
+}
+
+class MemoryConsumer implements Consumer {
+  readonly #broker: MemoryBroker;
+  readonly #topic: string;
+  readonly #handler: ConsumerFunc;
+  readonly #observer: Observer;
+  readonly #consumed: ReturnType<typeof consumedCounter>;
+
+  constructor(
+    broker: MemoryBroker,
+    topic: string,
+    handler: ConsumerFunc,
+    deps?: ObservabilityDeps,
+  ) {
+    this.#broker = broker;
+    this.#topic = topic;
+    this.#handler = handler;
+    this.#observer = makeObserver(`${topic}_consumer`, deps);
+    this.#consumed = consumedCounter(deps, topic);
+  }
+
+  consume(signal?: AbortSignal, onError?: (err: unknown) => void): Promise<void> {
+    if (signal?.aborted) {
+      return Promise.resolve();
+    }
+
+    const unsubscribe = this.#broker.subscribe(this.#topic, (data) =>
+      this.#deliver(data, onError),
+    );
+
+    return new Promise<void>((resolve) => {
+      const stop = (): void => {
+        unsubscribe();
+        resolve();
+      };
+      signal?.addEventListener("abort", stop, { once: true });
+    });
+  }
+
+  async #deliver(data: Uint8Array, onError?: (err: unknown) => void): Promise<void> {
+    await this.#observer.run("consume_message", async (op) => {
+      op.set(TOPIC_KEY, this.#topic).set(LENGTH_KEY, data.length);
+      this.#consumed.add(1);
+      try {
+        await this.#handler(data);
+      } catch (err) {
+        op.acknowledge(err, "handling message");
+        onError?.(err);
+      }
+    });
+  }
+}
+
+/** A {@link ConsumerProvider} backed by an in-process {@link MemoryBroker}. */
+export class MemoryConsumerProvider implements ConsumerProvider {
+  readonly #broker: MemoryBroker;
+  readonly #deps: ObservabilityDeps | undefined;
+  readonly #cache = new TopicCache<Consumer>();
+
+  constructor(broker: MemoryBroker = defaultBroker, deps?: ObservabilityDeps) {
+    this.#broker = broker;
+    this.#deps = deps;
+  }
+
+  provideConsumer(topic: string, handler: ConsumerFunc): Promise<Consumer> {
+    if (topic === "") {
+      return Promise.reject(ErrEmptyTopicName);
+    }
+    return this.#cache.getOrBuild(topic, () =>
+      Promise.resolve(new MemoryConsumer(this.#broker, topic, handler, this.#deps)),
+    );
+  }
+}
+
+/** Builds a memory-backed {@link PublisherProvider}. Defaults to the shared module-level broker. */
+export function provideMemoryPublisherProvider(
+  deps?: ObservabilityDeps,
+  broker?: MemoryBroker,
+): PublisherProvider {
+  return new MemoryPublisherProvider(broker ?? defaultBroker, deps);
+}
+
+/** Builds a memory-backed {@link ConsumerProvider}. Defaults to the shared module-level broker. */
+export function provideMemoryConsumerProvider(
+  deps?: ObservabilityDeps,
+  broker?: MemoryBroker,
+): ConsumerProvider {
+  return new MemoryConsumerProvider(broker ?? defaultBroker, deps);
 }

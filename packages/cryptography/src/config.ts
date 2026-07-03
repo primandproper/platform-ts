@@ -2,21 +2,24 @@ import { z } from "zod";
 
 /**
  * Encryption config. Replaces the Go `env:`-tagged struct + ozzo `ValidateWithContext`.
- * The AES-GCM key is supplied as raw key bytes, base64-encoded, and must decode to a valid
- * AES key length (128, 192, or 256 bits).
+ * The key is supplied as raw key bytes, base64-encoded. `aes-gcm` accepts a 128/192/256-bit
+ * key; `salsa20` requires a 256-bit key.
  */
 export const EncryptionConfigSchema = z
   .object({
-    provider: z.enum(["aes-gcm", "passthrough"]).default("aes-gcm"),
-    /** Base64-encoded raw AES key. Required for the `aes-gcm` provider. */
+    provider: z.enum(["aes-gcm", "salsa20", "passthrough"]).default("aes-gcm"),
+    /** Base64-encoded raw key. Required for the `aes-gcm` and `salsa20` providers. */
     key: z.string().optional(),
   })
   .superRefine((cfg, ctx) => {
-    if (cfg.provider === "aes-gcm" && cfg.key === undefined) {
+    if (
+      (cfg.provider === "aes-gcm" || cfg.provider === "salsa20") &&
+      cfg.key === undefined
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["key"],
-        message: "key is required when provider is 'aes-gcm'",
+        message: `key is required when provider is '${cfg.provider}'`,
       });
     }
   });

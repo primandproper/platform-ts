@@ -42,6 +42,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
+    "@noble/ciphers": "2.2.0",
     "@primandproper/observability": "workspace:*",
     "zod": "3.25.76"
   }

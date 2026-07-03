@@ -4,6 +4,7 @@ import { base64ToBytes, bytesToBase64 } from "./base64.js";
 import type { Encryptor } from "./encryption.js";
 import { AesGcmEncryptor } from "./providers/aes-gcm.js";
 import { PassthroughEncryptor } from "./providers/passthrough.js";
+import { Salsa20Encryptor } from "./providers/salsa20.js";
 import { SubtleHasher } from "./providers/subtle-hasher.js";
 
 const encoder = new TextEncoder();
@@ -44,6 +45,7 @@ function roundTripConformance(name: string, make: () => Encryptor): void {
 }
 
 roundTripConformance("AesGcmEncryptor", () => new AesGcmEncryptor({ key: TEST_KEY }));
+roundTripConformance("Salsa20Encryptor", () => new Salsa20Encryptor({ key: TEST_KEY }));
 roundTripConformance("PassthroughEncryptor", () => new PassthroughEncryptor());
 
 describe("AesGcmEncryptor", () => {
@@ -89,6 +91,37 @@ describe("AesGcmEncryptor", () => {
     const b = new AesGcmEncryptor({ key: bytesToBase64(new Uint8Array(32).fill(1)) });
     const ciphertext = await a.encrypt(encoder.encode("secret"));
     await expect(b.decrypt(ciphertext)).rejects.toThrow(/tampered|invalid/);
+  });
+});
+
+describe("Salsa20Encryptor", () => {
+  it("uses a fresh nonce per call, so ciphertexts differ", async () => {
+    const enc = new Salsa20Encryptor({ key: TEST_KEY });
+    const plaintext = encoder.encode("same message");
+    const a = await enc.encrypt(plaintext);
+    const b = await enc.encrypt(plaintext);
+    expect(toHex(a)).not.toBe(toHex(b));
+    expect(await enc.decrypt(a)).toStrictEqual(plaintext);
+    expect(await enc.decrypt(b)).toStrictEqual(plaintext);
+  });
+
+  it("prepends an 8-byte nonce to the same-length keystream", async () => {
+    const enc = new Salsa20Encryptor({ key: TEST_KEY });
+    const plaintext = encoder.encode("stream cipher");
+    const ciphertext = await enc.encrypt(plaintext);
+    // 8-byte nonce + plaintext length (stream cipher, no tag).
+    expect(ciphertext.byteLength).toBe(8 + plaintext.byteLength);
+  });
+
+  it("rejects ciphertext too short to contain a nonce", async () => {
+    const enc = new Salsa20Encryptor({ key: TEST_KEY });
+    await expect(enc.decrypt(new Uint8Array(4))).rejects.toThrow(/too short/);
+  });
+
+  it("rejects a key that is not 32 bytes", () => {
+    expect(() => new Salsa20Encryptor({ key: bytesToBase64(new Uint8Array(16)) })).toThrow(
+      /key length/,
+    );
   });
 });
 

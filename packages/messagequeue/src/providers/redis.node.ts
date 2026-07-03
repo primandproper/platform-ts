@@ -1,205 +1,243 @@
-import { randomUUID } from "node:crypto";
-
-import { wrap } from "@primandproper/errors";
 import {
   makeObserver,
-  type Logger,
   type ObservabilityDeps,
   type Observer,
 } from "@primandproper/observability";
-import { Redis } from "ioredis";
+import { Cluster, Redis } from "ioredis";
 
-import type {
-  Message,
-  MessageHandler,
-  MessageQueue,
-  OutgoingMessage,
-  Subscription,
+import {
+  ErrEmptyTopicName,
+  type Consumer,
+  type ConsumerFunc,
+  type ConsumerProvider,
+  type Publisher,
+  type PublisherProvider,
 } from "../messagequeue.js";
 
+import {
+  consumedCounter,
+  encodeJSON,
+  LENGTH_KEY,
+  publisherInstruments,
+  TOPIC_KEY,
+  TopicCache,
+  type PublisherInstruments,
+} from "./support.js";
+
+/** Redis connection config. Faithful to Go's `redis.Config`. */
 export interface RedisMessageQueueOptions {
-  url: string;
-  /** Prepended to every topic to namespace its stream key. */
-  keyPrefix?: string;
-  /** How long each blocking read parks waiting for new messages, in milliseconds. */
-  blockMs?: number;
-  /** Maximum number of messages pulled per read. */
-  batchSize?: number;
+  /** One or more `host:port` addresses. Multiple addresses select a cluster client. */
+  queueAddresses: string[];
+  username?: string | undefined;
+  password?: string | undefined;
 }
 
-const o11yName = "messagequeue";
+/** The subset of the ioredis surface both {@link Redis} and {@link Cluster} share that we use. */
+interface PubSubConn {
+  publish(channel: string, message: Buffer): Promise<number>;
+  subscribe(...channels: string[]): Promise<unknown>;
+  unsubscribe(...channels: string[]): Promise<unknown>;
+  ping(): Promise<string>;
+  quit(): Promise<unknown>;
+  disconnect(): void;
+  on(
+    event: "messageBuffer",
+    listener: (channel: Buffer, message: Buffer) => void,
+  ): unknown;
+}
 
-const DEFAULT_BLOCK_MS = 5_000;
-const DEFAULT_BATCH_SIZE = 16;
-const ERROR_BACKOFF_MS = 1_000;
+function parseAddress(address: string): { host: string; port: number } {
+  const idx = address.lastIndexOf(":");
+  if (idx === -1) {
+    return { host: address, port: 6379 };
+  }
+  return { host: address.slice(0, idx), port: Number(address.slice(idx + 1)) || 6379 };
+}
 
-/** XREADGROUP reply: one entry per stream, each carrying a list of `[id, [field, value, …]]`. */
-type StreamReply = [stream: string, entries: [id: string, fields: string[]][]][] | null;
+/** Builds a single-node or cluster client from the configured addresses. */
+function createRedisClient(options: RedisMessageQueueOptions): PubSubConn {
+  const { username, password } = options;
+  const nodes = options.queueAddresses.map(parseAddress);
 
-/**
- * Node-only provider backed by Redis Streams (ioredis). Each topic maps to a stream; `publish`
- * is an `XADD`. Every {@link subscribe} call creates its own consumer group starting at `$`, so
- * subscribers each receive a copy of messages published after they subscribe — the same fan-out
- * the memory provider gives, but durable and cross-process. Reads block on a dedicated duplicated
- * connection and `XACK` only after the handler resolves; a throwing handler leaves the message
- * pending (visible in the group's PEL) rather than dropping it. Server-side only.
- */
-export class RedisMessageQueue implements MessageQueue {
-  readonly #client: Redis;
-  readonly #prefix: string;
-  readonly #blockMs: number;
-  readonly #batchSize: number;
+  if (nodes.length > 1) {
+    return new Cluster(nodes, {
+      redisOptions: { username, password, lazyConnect: true },
+    });
+  }
+
+  const node = nodes[0] ?? { host: "localhost", port: 6379 };
+  return new Redis({
+    host: node.host,
+    port: node.port,
+    username,
+    password,
+    lazyConnect: true,
+  });
+}
+
+class RedisPublisher implements Publisher {
+  readonly #client: PubSubConn;
+  readonly #topic: string;
   readonly #observer: Observer;
-  readonly #logger: Logger;
+  readonly #instruments: PublisherInstruments;
 
-  constructor(options: RedisMessageQueueOptions, deps: ObservabilityDeps = {}) {
-    this.#client = new Redis(options.url, { lazyConnect: true });
-    this.#prefix = options.keyPrefix ?? "";
-    this.#blockMs = options.blockMs ?? DEFAULT_BLOCK_MS;
-    this.#batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
-    this.#observer = deps.observer ?? makeObserver(o11yName, deps);
-    this.#logger = this.#observer.logger();
+  constructor(client: PubSubConn, topic: string, deps?: ObservabilityDeps) {
+    this.#client = client;
+    this.#topic = topic;
+    this.#observer = makeObserver(`${topic}_publisher`, deps);
+    this.#instruments = publisherInstruments(deps, topic);
   }
 
-  async publish(topic: string, message: OutgoingMessage): Promise<void> {
-    const id = message.id ?? randomUUID();
-    const fields = ["id", id, "body", message.body];
-    if (message.attributes !== undefined) {
-      fields.push("attributes", JSON.stringify(message.attributes));
-    }
-
-    try {
-      await this.#client.xadd(this.#key(topic), "*", ...fields);
-    } catch (err) {
-      throw wrap(`messagequeue: failed to publish to ${topic} on redis`, err);
-    }
-  }
-
-  async subscribe(topic: string, handler: MessageHandler): Promise<Subscription> {
-    const key = this.#key(topic);
-    const group = `mq:${randomUUID()}`;
-
-    try {
-      // MKSTREAM creates the stream when absent; `$` starts the group at messages published
-      // from here on, mirroring the memory provider's subscribe-then-deliver semantics.
-      await this.#client.xgroup("CREATE", key, group, "$", "MKSTREAM");
-    } catch (err) {
-      throw wrap(
-        `messagequeue: failed to create consumer group for ${topic} on redis`,
-        err,
-      );
-    }
-
-    const reader = this.#client.duplicate();
-    let active = true;
-    const runner = this.#readLoop(reader, key, group, handler, () => active);
-
-    const unsubscribe = async (): Promise<void> => {
-      if (!active) {
-        return;
-      }
-      active = false;
-      reader.disconnect(); // interrupts the in-flight blocking read
-      await runner;
+  async publish(data: unknown): Promise<void> {
+    await this.#observer.run("publish", async (op) => {
+      let bytes: Uint8Array;
       try {
-        await this.#client.xgroup("DESTROY", key, group);
+        bytes = encodeJSON(data);
       } catch (err) {
-        this.#logger.error(
-          "messagequeue: failed to destroy consumer group on redis",
-          err,
-        );
+        this.#instruments.publishErrors.add(1);
+        throw op.error(err, "encoding topic message");
       }
-    };
 
-    return { unsubscribe };
+      op.set(TOPIC_KEY, this.#topic).set(LENGTH_KEY, bytes.length);
+
+      const start = performance.now();
+      try {
+        await this.#client.publish(this.#topic, Buffer.from(bytes));
+      } catch (err) {
+        this.#instruments.publishErrors.add(1);
+        throw op.error(err, "publishing message");
+      }
+
+      this.#instruments.published.add(1);
+      this.#instruments.latency.record(performance.now() - start);
+    });
+  }
+
+  publishAsync(data: unknown): void {
+    this.publish(data).catch((err: unknown) => {
+      this.#observer.logger().error("publishing message", err);
+    });
+  }
+
+  // The publishing connection is owned by the provider, which closes it; a per-publisher stop
+  // would tear the shared client out from under sibling publishers.
+  stop(): void {}
+}
+
+/** A {@link PublisherProvider} backed by Redis PUBLISH. Faithful to Go's `redis` publisher. */
+export class RedisPublisherProvider implements PublisherProvider {
+  readonly #client: PubSubConn;
+  readonly #deps: ObservabilityDeps | undefined;
+  readonly #cache = new TopicCache<Publisher>();
+
+  constructor(options: RedisMessageQueueOptions, deps?: ObservabilityDeps) {
+    this.#client = createRedisClient(options);
+    this.#deps = deps;
+  }
+
+  providePublisher(topic: string): Promise<Publisher> {
+    if (topic === "") {
+      return Promise.reject(ErrEmptyTopicName);
+    }
+    return this.#cache.getOrBuild(topic, () =>
+      Promise.resolve(new RedisPublisher(this.#client, topic, this.#deps)),
+    );
   }
 
   async ping(): Promise<void> {
-    try {
-      await this.#client.ping();
-    } catch (err) {
-      throw wrap("messagequeue: redis ping failed", err);
-    }
+    await this.#client.ping();
   }
 
-  async #readLoop(
-    reader: Redis,
-    key: string,
-    group: string,
-    handler: MessageHandler,
-    isActive: () => boolean,
-  ): Promise<void> {
-    while (isActive()) {
-      let reply: StreamReply;
+  close(): void {
+    this.#cache.clear();
+    this.#client.quit().catch(() => {
+      this.#client.disconnect();
+    });
+  }
+}
+
+class RedisConsumer implements Consumer {
+  readonly #options: RedisMessageQueueOptions;
+  readonly #topic: string;
+  readonly #handler: ConsumerFunc;
+  readonly #observer: Observer;
+  readonly #consumed: ReturnType<typeof consumedCounter>;
+
+  constructor(
+    options: RedisMessageQueueOptions,
+    topic: string,
+    handler: ConsumerFunc,
+    deps?: ObservabilityDeps,
+  ) {
+    this.#options = options;
+    this.#topic = topic;
+    this.#handler = handler;
+    this.#observer = makeObserver(`${topic}_consumer`, deps);
+    this.#consumed = consumedCounter(deps, topic);
+  }
+
+  async consume(signal?: AbortSignal, onError?: (err: unknown) => void): Promise<void> {
+    if (signal?.aborted) {
+      return;
+    }
+
+    // A dedicated connection: once a Redis connection subscribes it enters subscriber mode and
+    // can no longer issue ordinary commands, so the consumer never shares the publisher's client.
+    const sub = createRedisClient(this.#options);
+
+    sub.on("messageBuffer", (_channel, message) => {
+      void this.#deliver(message, onError);
+    });
+
+    // Block until Redis confirms the SUBSCRIBE, mirroring Go's `subscription.Receive`: without
+    // it a publisher racing us would silently drop the first message, since Redis pub/sub does
+    // not buffer for late subscribers.
+    await sub.subscribe(this.#topic);
+    this.#observer.logger().debug("subscribed to topic");
+
+    return new Promise<void>((resolve) => {
+      const stop = (): void => {
+        sub.unsubscribe(this.#topic).catch(() => undefined);
+        sub.quit().catch(() => {
+          sub.disconnect();
+        });
+        resolve();
+      };
+      signal?.addEventListener("abort", stop, { once: true });
+    });
+  }
+
+  async #deliver(message: Buffer, onError?: (err: unknown) => void): Promise<void> {
+    await this.#observer.run("consume_message", async (op) => {
+      op.set(TOPIC_KEY, this.#topic).set(LENGTH_KEY, message.length);
+      this.#consumed.add(1);
       try {
-        reply = (await reader.xreadgroup(
-          "GROUP",
-          group,
-          "consumer",
-          "COUNT",
-          this.#batchSize,
-          "BLOCK",
-          this.#blockMs,
-          "STREAMS",
-          key,
-          ">",
-        )) as StreamReply;
+        await this.#handler(new Uint8Array(message));
       } catch (err) {
-        if (!isActive()) {
-          break; // disconnect() during unsubscribe; expected
-        }
-        this.#logger.error("messagequeue: redis read loop failed; retrying", err);
-        await delay(ERROR_BACKOFF_MS);
-        continue;
+        op.acknowledge(err, "handling message");
+        onError?.(err);
       }
-
-      if (reply === null) {
-        continue; // block timeout, nothing new
-      }
-
-      for (const [, entries] of reply) {
-        for (const [entryId, fields] of entries) {
-          const message = parseMessage(fields);
-          try {
-            await handler(message);
-            await reader.xack(key, group, entryId);
-          } catch (err) {
-            this.#logger.error(
-              "messagequeue: handler failed; leaving message pending",
-              err,
-            );
-          }
-        }
-      }
-    }
-  }
-
-  #key(topic: string): string {
-    return this.#prefix + topic;
+    });
   }
 }
 
-/** Rebuilds a {@link Message} from a stream entry's flat `[field, value, …]` array. */
-function parseMessage(fields: string[]): Message {
-  const record: Record<string, string> = {};
-  for (let i = 0; i + 1 < fields.length; i += 2) {
-    const field = fields[i];
-    const value = fields[i + 1];
-    if (field !== undefined && value !== undefined) {
-      record[field] = value;
+/** A {@link ConsumerProvider} backed by Redis SUBSCRIBE. Faithful to Go's `redis` consumer. */
+export class RedisConsumerProvider implements ConsumerProvider {
+  readonly #options: RedisMessageQueueOptions;
+  readonly #deps: ObservabilityDeps | undefined;
+  readonly #cache = new TopicCache<Consumer>();
+
+  constructor(options: RedisMessageQueueOptions, deps?: ObservabilityDeps) {
+    this.#options = options;
+    this.#deps = deps;
+  }
+
+  provideConsumer(topic: string, handler: ConsumerFunc): Promise<Consumer> {
+    if (topic === "") {
+      return Promise.reject(ErrEmptyTopicName);
     }
+    return this.#cache.getOrBuild(topic, () =>
+      Promise.resolve(new RedisConsumer(this.#options, topic, handler, this.#deps)),
+    );
   }
-
-  const message: Message = {
-    id: record.id ?? "",
-    body: record.body ?? "",
-  };
-  if (record.attributes !== undefined) {
-    message.attributes = JSON.parse(record.attributes) as Record<string, string>;
-  }
-  return message;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

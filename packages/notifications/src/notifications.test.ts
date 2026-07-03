@@ -1,226 +1,271 @@
+import {
+  makeRecordingObserver,
+  type MeterProvider,
+  type ObservabilityDeps,
+} from "@primandproper/observability";
 import { describe, expect, it, vi } from "vitest";
 
-import type { Notification, NotificationClient } from "./notifications.js";
-import { InMemoryNotificationClient } from "./providers/memory.js";
-import { NoopNotificationClient } from "./providers/noop.js";
 import {
-  WebSocketNotificationClient,
-  type WebSocketLike,
-} from "./providers/websocket.js";
+  AblyAsyncNotifier,
+  ApnsSender,
+  type ApnsClient,
+  type AsyncNotifier,
+  type ChannelPublisher,
+  ErrPlatformNotSupported,
+  FcmSender,
+  type FcmClient,
+  MultiPlatformPushSender,
+  NoopAsyncNotifier,
+  NoopPushNotificationSender,
+  provideAsyncNotifier,
+  providePushSender,
+  type PushNotificationSender,
+  PusherAsyncNotifier,
+  type PusherClient,
+} from "./index.js";
 
-function note(overrides: Partial<Notification> = {}): Notification {
-  return {
-    id: "n1",
-    channel: "alerts",
-    type: "ping",
-    payload: { ok: true },
-    ...overrides,
+/** A MeterProvider that records every counter `add`, so tests can assert send/error counters. */
+function countingMeter(): { deps: ObservabilityDeps; counts: Map<string, number> } {
+  const counts = new Map<string, number>();
+  const meter = {
+    createCounter: (name: string) => ({
+      add: (value: number) => counts.set(name, (counts.get(name) ?? 0) + value),
+    }),
   };
+  const provider = { getMeter: () => meter } as unknown as MeterProvider;
+  return { deps: { metrics: provider }, counts };
 }
 
-describe("InMemoryNotificationClient", () => {
-  it("routes a publish to the matching channel handler only", () => {
-    const client = new InMemoryNotificationClient();
-    const alerts = vi.fn();
-    const billing = vi.fn();
-    client.subscribe("alerts", alerts);
-    client.subscribe("billing", billing);
+describe("PusherAsyncNotifier", () => {
+  it("triggers the channel with the event type and data, counting the send", async () => {
+    const trigger = vi.fn<PusherClient["trigger"]>().mockResolvedValue(undefined);
+    const { deps, counts } = countingMeter();
 
-    const n = note({ channel: "alerts" });
-    client.publish(n);
+    const notifier = new PusherAsyncNotifier({ trigger }, deps);
+    await notifier.publish("room-1", { type: "message", data: { hello: "world" } });
 
-    expect(alerts).toHaveBeenCalledOnce();
-    expect(alerts).toHaveBeenCalledWith(n);
-    expect(billing).not.toHaveBeenCalled();
+    expect(trigger).toHaveBeenCalledWith("room-1", "message", { hello: "world" });
+    expect(counts.get("async_notifications_pusher_sends")).toBe(1);
+    notifier.close();
   });
 
-  it("stops delivery after unsubscribe", () => {
-    const client = new InMemoryNotificationClient();
-    const handler = vi.fn();
-    const unsubscribe = client.subscribe("alerts", handler);
+  it("surfaces a trigger failure through the operation and counts the error", async () => {
+    const boom = new Error("pusher down");
+    const observer = makeRecordingObserver();
+    const { deps, counts } = countingMeter();
 
-    client.publish(note());
-    unsubscribe();
-    client.publish(note({ id: "n2" }));
+    const notifier = new PusherAsyncNotifier(
+      { trigger: () => Promise.reject(boom) },
+      { ...deps, observer },
+    );
 
-    expect(handler).toHaveBeenCalledTimes(1);
-  });
-
-  it("is idempotent on repeated unsubscribe", () => {
-    const client = new InMemoryNotificationClient();
-    const handler = vi.fn();
-    const unsubscribe = client.subscribe("alerts", handler);
-    unsubscribe();
-    unsubscribe();
-
-    client.publish(note());
-    expect(handler).not.toHaveBeenCalled();
-  });
-
-  it("delivers every notification to onNotification regardless of channel", () => {
-    const client = new InMemoryNotificationClient();
-    const observer = vi.fn();
-    client.onNotification(observer);
-
-    client.publish(note({ channel: "alerts" }));
-    client.publish(note({ id: "n2", channel: "billing" }));
-
-    expect(observer).toHaveBeenCalledTimes(2);
-  });
-
-  it("isolates a throwing handler from the others", () => {
-    const client = new InMemoryNotificationClient();
-    const good = vi.fn();
-    client.subscribe("alerts", () => {
-      throw new Error("boom");
-    });
-    client.subscribe("alerts", good);
-
-    expect(() => {
-      client.publish(note());
-    }).not.toThrow();
-    expect(good).toHaveBeenCalledTimes(1);
-  });
-
-  it("tracks connect/close state", () => {
-    const client = new InMemoryNotificationClient();
-    expect(client.state).toBe("idle");
-    client.connect();
-    expect(client.state).toBe("open");
-    client.close();
-    expect(client.state).toBe("closed");
+    await expect(notifier.publish("room-1", { type: "message" })).rejects.toBe(boom);
+    expect(counts.get("async_notifications_pusher_errors")).toBe(1);
+    expect(observer.errors.map((e) => e.description)).toContain(
+      "publishing to pusher channel",
+    );
   });
 });
 
-describe("NoopNotificationClient", () => {
-  it("subscribes and connects without effect", () => {
-    const client: NotificationClient = new NoopNotificationClient();
-    const handler = vi.fn();
-    const unsubscribe = client.subscribe("alerts", handler);
-    client.connect();
-    client.close();
-    unsubscribe();
-    expect(handler).not.toHaveBeenCalled();
-    expect(client.state).toBe("idle");
+describe("AblyAsyncNotifier", () => {
+  it("publishes the event name and data to the channel", async () => {
+    const publish = vi.fn<ChannelPublisher["publish"]>().mockResolvedValue(undefined);
+    const { deps, counts } = countingMeter();
+
+    const notifier = new AblyAsyncNotifier({ publish }, deps);
+    await notifier.publish("chan", { type: "tick", data: 42 });
+
+    expect(publish).toHaveBeenCalledWith("chan", "tick", 42);
+    expect(counts.get("async_notifications_ably_sends")).toBe(1);
+  });
+
+  it("surfaces a publish failure and counts the error", async () => {
+    const boom = new Error("ably down");
+    const { deps, counts } = countingMeter();
+    const notifier = new AblyAsyncNotifier({ publish: () => Promise.reject(boom) }, deps);
+
+    await expect(notifier.publish("chan", { type: "tick" })).rejects.toBe(boom);
+    expect(counts.get("async_notifications_ably_errors")).toBe(1);
   });
 });
 
-/** A controllable fake `WebSocket` — no real socket is ever opened. */
-class FakeWebSocket implements WebSocketLike {
-  readonly #listeners = {
-    open: new Set<() => void>(),
-    close: new Set<() => void>(),
-    message: new Set<(event: { data: unknown }) => void>(),
-  };
-  closed = false;
+describe("ApnsSender", () => {
+  const validToken = "a".repeat(64);
 
-  addEventListener(type: "open" | "close", listener: () => void): void;
-  addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
-  addEventListener(type: "open" | "close" | "message", listener: unknown): void {
-    if (type === "message") {
-      this.#listeners.message.add(listener as (event: { data: unknown }) => void);
-    } else {
-      this.#listeners[type].add(listener as () => void);
-    }
-  }
+  it("sends an alert to a valid device token, counting the send", async () => {
+    const send = vi
+      .fn<ApnsClient["send"]>()
+      .mockResolvedValue({ sent: [{ device: validToken }], failed: [] });
+    const { deps, counts } = countingMeter();
 
-  close(): void {
-    this.closed = true;
-    for (const listener of this.#listeners.close) {
-      listener();
-    }
-  }
+    const sender = new ApnsSender({ send }, "com.example.app", deps);
+    await sender.send(validToken, "Title", "Body", 3);
 
-  emitOpen(): void {
-    for (const listener of this.#listeners.open) {
-      listener();
-    }
-  }
+    expect(send).toHaveBeenCalledWith(
+      {
+        alert: { title: "Title", body: "Body" },
+        badge: 3,
+        topic: "com.example.app",
+        priority: 10,
+      },
+      validToken,
+    );
+    expect(counts.get("ios_notif_sender_sends")).toBe(1);
+  });
 
-  emitMessage(data: unknown): void {
-    for (const listener of this.#listeners.message) {
-      listener({ data });
-    }
-  }
-}
+  it("rejects a malformed device token before calling the client", async () => {
+    const send = vi.fn<ApnsClient["send"]>();
+    const sender = new ApnsSender({ send }, "com.example.app");
 
-describe("WebSocketNotificationClient", () => {
-  function setup(): { client: WebSocketNotificationClient; socket: FakeWebSocket } {
-    const socket = new FakeWebSocket();
-    const client = new WebSocketNotificationClient({
-      url: "wss://example.test/ws",
-      webSocketFactory: () => socket,
+    await expect(sender.send("not-hex", "T", "B")).rejects.toThrow(
+      /invalid device token/,
+    );
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("errors and counts when APNs reports the token failed", async () => {
+    const send = vi.fn<ApnsClient["send"]>().mockResolvedValue({
+      sent: [],
+      failed: [{ device: validToken, status: 410, response: { reason: "Unregistered" } }],
     });
-    return { client, socket };
+    const { deps, counts } = countingMeter();
+    const sender = new ApnsSender({ send }, "com.example.app", deps);
+
+    await expect(sender.send(validToken, "T", "B")).rejects.toThrow(/Unregistered/);
+    expect(counts.get("ios_notif_sender_errors")).toBe(1);
+  });
+});
+
+describe("FcmSender", () => {
+  it("sends a notification and records the message id", async () => {
+    const send = vi.fn<FcmClient["send"]>().mockResolvedValue("projects/x/messages/1");
+    const { deps, counts } = countingMeter();
+
+    const sender = new FcmSender({ send }, deps);
+    await sender.send("device-token", "Title", "Body");
+
+    expect(send).toHaveBeenCalledWith({
+      token: "device-token",
+      notification: { title: "Title", body: "Body" },
+    });
+    expect(counts.get("android_notif_sender_sends")).toBe(1);
+  });
+
+  it("surfaces a send failure and counts the error", async () => {
+    const boom = new Error("fcm down");
+    const { deps, counts } = countingMeter();
+    const sender = new FcmSender({ send: () => Promise.reject(boom) }, deps);
+
+    await expect(sender.send("device-token", "T", "B")).rejects.toBe(boom);
+    expect(counts.get("android_notif_sender_errors")).toBe(1);
+  });
+});
+
+describe("MultiPlatformPushSender", () => {
+  const iosToken = "b".repeat(64);
+
+  function build(opts: { apns?: boolean; fcm?: boolean }): {
+    sender: MultiPlatformPushSender;
+    apnsSend: ReturnType<typeof vi.fn<ApnsClient["send"]>>;
+    fcmSend: ReturnType<typeof vi.fn<FcmClient["send"]>>;
+  } {
+    const apnsSend = vi
+      .fn<ApnsClient["send"]>()
+      .mockResolvedValue({ sent: [{ device: iosToken }], failed: [] });
+    const fcmSend = vi.fn<FcmClient["send"]>().mockResolvedValue("msg-1");
+    const apnsSender = opts.apns
+      ? new ApnsSender({ send: apnsSend }, "com.example.app")
+      : undefined;
+    const fcmSender = opts.fcm ? new FcmSender({ send: fcmSend }) : undefined;
+    return {
+      sender: new MultiPlatformPushSender(apnsSender, fcmSender),
+      apnsSend,
+      fcmSend,
+    };
   }
 
-  it("dispatches an inbound JSON frame to the channel subscriber", () => {
-    const { client, socket } = setup();
-    const handler = vi.fn();
-    client.subscribe("alerts", handler);
-    client.connect();
+  it("routes iOS (case-insensitive) to APNs and Android to FCM", async () => {
+    const { sender, apnsSend, fcmSend } = build({ apns: true, fcm: true });
 
-    const n = note({ channel: "alerts" });
-    socket.emitMessage(JSON.stringify(n));
+    await sender.sendPush("iOS", iosToken, { title: "T", body: "B" });
+    await sender.sendPush("android", "android-token", { title: "T", body: "B" });
 
-    expect(handler).toHaveBeenCalledOnce();
-    expect(handler).toHaveBeenCalledWith(n);
+    expect(apnsSend).toHaveBeenCalledTimes(1);
+    expect(fcmSend).toHaveBeenCalledTimes(1);
   });
 
-  it("routes only to the matching channel", () => {
-    const { client, socket } = setup();
-    const alerts = vi.fn();
-    const billing = vi.fn();
-    client.subscribe("alerts", alerts);
-    client.subscribe("billing", billing);
-    client.connect();
-
-    socket.emitMessage(JSON.stringify(note({ channel: "billing" })));
-
-    expect(billing).toHaveBeenCalledTimes(1);
-    expect(alerts).not.toHaveBeenCalled();
+  it("rejects with ErrPlatformNotSupported when the platform sender is absent", async () => {
+    const { sender } = build({ fcm: true });
+    await expect(
+      sender.sendPush("ios", iosToken, { title: "T", body: "B" }),
+    ).rejects.toBe(ErrPlatformNotSupported);
   });
 
-  it("drops malformed frames without throwing", () => {
-    const { client, socket } = setup();
-    const observer = vi.fn();
-    client.onNotification(observer);
-    client.connect();
+  it("rejects an unknown platform", async () => {
+    const { sender } = build({ apns: true, fcm: true });
+    await expect(
+      sender.sendPush("blackberry", "token", { title: "T", body: "B" }),
+    ).rejects.toThrow(/unknown platform/);
+  });
+});
 
+describe("noop providers", () => {
+  it("NoopAsyncNotifier publishes and closes without throwing", async () => {
+    const notifier: AsyncNotifier = new NoopAsyncNotifier();
+    await expect(notifier.publish("c", { type: "t" })).resolves.toBeUndefined();
     expect(() => {
-      socket.emitMessage("not json");
+      notifier.close();
     }).not.toThrow();
-    expect(() => {
-      socket.emitMessage(JSON.stringify({ id: 1 }));
-    }).not.toThrow();
-    expect(observer).not.toHaveBeenCalled();
   });
 
-  it("manages state across connect, open, and close", () => {
-    const { client, socket } = setup();
-    expect(client.state).toBe("idle");
+  it("NoopPushNotificationSender sends without throwing", async () => {
+    const sender: PushNotificationSender = new NoopPushNotificationSender();
+    await expect(
+      sender.sendPush("ios", "token", { title: "T", body: "B" }),
+    ).resolves.toBeUndefined();
+  });
+});
 
-    client.connect();
-    expect(client.state).toBe("connecting");
-
-    socket.emitOpen();
-    expect(client.state).toBe("open");
-
-    client.close();
-    expect(client.state).toBe("closed");
-    expect(socket.closed).toBe(true);
+describe("provideAsyncNotifier", () => {
+  it("defaults to a noop notifier", () => {
+    expect(provideAsyncNotifier()).toBeInstanceOf(NoopAsyncNotifier);
   });
 
-  it("connects only once while already connecting or open", () => {
-    const factory = vi.fn(() => new FakeWebSocket());
-    const client = new WebSocketNotificationClient({
-      url: "wss://example.test/ws",
-      webSocketFactory: factory,
+  it("requires the pusher block when provider is pusher", () => {
+    expect(() => provideAsyncNotifier({ provider: "pusher" })).toThrow(
+      /pusher config is required/,
+    );
+  });
+
+  it("builds a pusher notifier from a valid config", () => {
+    const notifier = provideAsyncNotifier({
+      provider: "pusher",
+      pusher: { appID: "1", key: "k", secret: "s", cluster: "us1" },
     });
+    expect(notifier).toBeInstanceOf(PusherAsyncNotifier);
+  });
 
-    client.connect();
-    client.connect();
+  it("builds an ably notifier from a valid config", () => {
+    const notifier = provideAsyncNotifier({ provider: "ably", ably: { apiKey: "x:y" } });
+    expect(notifier).toBeInstanceOf(AblyAsyncNotifier);
+  });
 
-    expect(factory).toHaveBeenCalledTimes(1);
+  it("rejects the out-of-scope websocket/sse providers", () => {
+    expect(() => provideAsyncNotifier({ provider: "websocket" })).toThrow(
+      /not implemented/,
+    );
+    expect(() => provideAsyncNotifier({ provider: "sse" })).toThrow(/not implemented/);
+  });
+});
+
+describe("providePushSender", () => {
+  it("defaults to a noop sender", () => {
+    expect(providePushSender()).toBeInstanceOf(NoopPushNotificationSender);
+  });
+
+  it("falls back to noop under apns_fcm when neither platform is configured", () => {
+    expect(providePushSender({ provider: "apns_fcm" })).toBeInstanceOf(
+      NoopPushNotificationSender,
+    );
   });
 });

@@ -2,7 +2,7 @@
   "name": "@primandproper/notifications",
   "version": "0.0.0",
   "type": "module",
-  "description": "Isomorphic notifications: a NotificationClient interface for async client delivery with swappable providers.",
+  "description": "Server-only notifications: an AsyncNotifier publisher and a mobile PushNotificationSender with swappable providers.",
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
@@ -15,21 +15,12 @@
   },
   "exports": {
     ".": {
-      "browser": {
-        "types": "./dist/index.browser.d.ts",
-        "default": "./dist/index.browser.js"
-      },
-      "node": {
-        "types": "./dist/index.node.d.ts",
-        "default": "./dist/index.node.js"
-      },
-      "default": {
-        "types": "./dist/index.node.d.ts",
-        "default": "./dist/index.node.js"
-      }
+      "types": "./dist/index.d.ts",
+      "node": "./dist/index.js",
+      "default": "./dist/index.js"
     }
   },
-  "types": "./dist/index.node.d.ts",
+  "types": "./dist/index.d.ts",
   "files": [
     "dist"
   ],
@@ -42,7 +33,12 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
+    "@parse/node-apn": "8.1.0",
+    "@primandproper/errors": "workspace:*",
     "@primandproper/observability": "workspace:*",
+    "ably": "2.23.0",
+    "firebase-admin": "14.1.0",
+    "pusher": "5.3.4",
     "zod": "3.25.76"
   }
 }

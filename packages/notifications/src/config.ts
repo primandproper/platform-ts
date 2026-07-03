@@ -1,39 +1,92 @@
 import { z } from "zod";
 
-/** Validated shape of an inbound notification frame. `payload` stays opaque (`unknown`). */
-export const NotificationSchema = z.object({
-  id: z.string(),
-  channel: z.string(),
-  type: z.string(),
-  payload: z.unknown(),
-  sentAt: z.number().optional(),
+/** Pusher async notifier config. Faithful to Go's `pusher.Config`. */
+export const PusherConfigSchema = z.object({
+  appID: z.string().min(1),
+  key: z.string().min(1),
+  secret: z.string().min(1),
+  cluster: z.string().min(1),
+  secure: z.boolean().default(false),
 });
+export type PusherConfig = z.infer<typeof PusherConfigSchema>;
 
-export const WebSocketOptionsSchema = z.object({
-  url: z.string().url(),
+/** Ably async notifier config. Faithful to Go's `ably.Config`. */
+export const AblyConfigSchema = z.object({
+  apiKey: z.string().min(1),
 });
-
-export type WebSocketOptionsConfig = z.infer<typeof WebSocketOptionsSchema>;
+export type AblyConfig = z.infer<typeof AblyConfigSchema>;
 
 /**
- * Notifications config. The provider set is identical on Node and the browser — the
- * websocket provider stays universal via an injectable socket — so call-site code is
- * portable. Replaces the Go platform's `env:`-tagged struct + ozzo `ValidateWithContext`.
+ * Async-notifier providers. `pusher`, `ably`, and `noop` are implemented. `websocket` and `sse`
+ * are accepted for parity with Go's provider set but are out of scope in platform-ts — they
+ * require server-side connection management + HTTP upgrade, which the server framework owns (see
+ * `ConnectionAcceptor`); the factory rejects them with a clear error.
  */
-export const NotificationConfigSchema = z
+export const ASYNC_NOTIFIER_PROVIDERS = [
+  "pusher",
+  "ably",
+  "websocket",
+  "sse",
+  "noop",
+] as const;
+
+/**
+ * Selects and configures an {@link import("./async.js").AsyncNotifier}. Replaces the Go
+ * `env:`-tagged `Config` + ozzo `ValidateWithContext`; the block for the selected provider is
+ * required (mirrors Go's `validation.When`).
+ */
+export const AsyncNotifierConfigSchema = z
   .object({
-    provider: z.enum(["websocket", "memory", "noop"]).default("memory"),
-    websocket: WebSocketOptionsSchema.optional(),
+    provider: z.enum(ASYNC_NOTIFIER_PROVIDERS).default("noop"),
+    pusher: PusherConfigSchema.optional(),
+    ably: AblyConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
-    if (cfg.provider === "websocket" && cfg.websocket === undefined) {
+    const required: Partial<Record<(typeof ASYNC_NOTIFIER_PROVIDERS)[number], unknown>> =
+      {
+        pusher: cfg.pusher,
+        ably: cfg.ably,
+      };
+    if (cfg.provider in required && required[cfg.provider] === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["websocket"],
-        message: "websocket config is required when provider is 'websocket'",
+        path: [cfg.provider],
+        message: `${cfg.provider} config is required when provider is '${cfg.provider}'`,
       });
     }
   });
+export type AsyncNotifierConfig = z.infer<typeof AsyncNotifierConfigSchema>;
+export type AsyncNotifierConfigInput = z.input<typeof AsyncNotifierConfigSchema>;
 
-export type NotificationConfig = z.infer<typeof NotificationConfigSchema>;
-export type NotificationConfigInput = z.input<typeof NotificationConfigSchema>;
+/** APNs config block for iOS push. Faithful to Go's mobile `APNsConfig`. */
+export const ApnsConfigSchema = z.object({
+  authKeyPath: z.string().min(1),
+  keyID: z.string().min(1),
+  teamID: z.string().min(1),
+  bundleID: z.string().min(1),
+  production: z.boolean().default(false),
+});
+export type ApnsConfigInput = z.input<typeof ApnsConfigSchema>;
+
+/** FCM config block for Android push. Faithful to Go's mobile `FCMConfig`. */
+export const FcmConfigSchema = z.object({
+  /** Path to the Firebase service-account JSON file. Empty ⇒ Application Default Credentials. */
+  credentialsPath: z.string().optional(),
+});
+export type FcmConfigInput = z.input<typeof FcmConfigSchema>;
+
+/** Push-sender providers. `apns_fcm` wires the real senders; `noop` sends nothing. */
+export const PUSH_SENDER_PROVIDERS = ["apns_fcm", "noop"] as const;
+
+/**
+ * Selects and configures a {@link import("./mobile.js").PushNotificationSender}. Faithful to Go's
+ * mobile `Config`: under `apns_fcm`, each platform block is optional and initialized
+ * independently — a missing or failing platform simply disables that platform.
+ */
+export const PushSenderConfigSchema = z.object({
+  provider: z.enum(PUSH_SENDER_PROVIDERS).default("noop"),
+  apns: ApnsConfigSchema.optional(),
+  fcm: FcmConfigSchema.optional(),
+});
+export type PushSenderConfig = z.infer<typeof PushSenderConfigSchema>;
+export type PushSenderConfigInput = z.input<typeof PushSenderConfigSchema>;

@@ -1,169 +1,255 @@
-import { randomUUID } from "node:crypto";
-
 import { describe, expect, it, vi } from "vitest";
 
-import { MemoryMessageQueue } from "./providers/memory.js";
-import { NoopMessageQueue } from "./providers/noop.js";
-import { RedisMessageQueue } from "./providers/redis.node.js";
+import {
+  type ConsumerProvider,
+  ErrEmptyTopicName,
+  KafkaConsumerProvider,
+  KafkaPublisherProvider,
+  MemoryBroker,
+  MemoryConsumerProvider,
+  MemoryPublisherProvider,
+  NoopConsumerProvider,
+  NoopPublisherProvider,
+  provideConsumerProvider,
+  providePublisherProvider,
+  type PublisherProvider,
+  PubSubConsumerProvider,
+  PubSubPublisherProvider,
+  RedisConsumerProvider,
+  RedisPublisherProvider,
+  SQSConsumerProvider,
+  SQSPublisherProvider,
+} from "./index.js";
 
-import { provideMessageQueue, type Message, type MessageQueue } from "./index.js";
+const decode = (data: Uint8Array): unknown => JSON.parse(new TextDecoder().decode(data));
 
-/**
- * Live-Redis integration is opt-in: set MESSAGEQUEUE_TEST_REDIS_URL to a reachable Redis
- * (e.g. redis://localhost:6379) to run the conformance + delivery suites against Redis Streams.
- * The default offline run skips them and stays green. Each instance gets a unique key prefix so
- * leftover streams never collide on a shared server.
- */
-const REDIS_URL = process.env.MESSAGEQUEUE_TEST_REDIS_URL;
+/** Waits a microtask-ish beat so background delivery loops can run. */
+const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
-const redisQueue = (): RedisMessageQueue =>
-  new RedisMessageQueue({
-    url: REDIS_URL ?? "redis://localhost:6379",
-    keyPrefix: `mqtest:${randomUUID()}:`,
-    blockMs: 200,
-  });
+describe("MemoryBroker round-trip", () => {
+  it("delivers a published message to a consuming consumer", async () => {
+    const broker = new MemoryBroker();
+    const publishers = new MemoryPublisherProvider(broker);
+    const consumers = new MemoryConsumerProvider(broker);
 
-/**
- * Provider-agnostic conformance suite. Running the same assertions against multiple
- * providers proves the `MessageQueue` interface is implementation-independent.
- */
-function conformance(name: string, make: () => MessageQueue): void {
-  describe(name, () => {
-    it("publishes without throwing", async () => {
-      await expect(make().publish("topic", { body: "hello" })).resolves.toBeUndefined();
-    });
-
-    it("subscribes and returns a Subscription", async () => {
-      const sub = await make().subscribe("topic", () => Promise.resolve());
-      await expect(sub.unsubscribe()).resolves.toBeUndefined();
-    });
-
-    it("pings without throwing", async () => {
-      await expect(make().ping()).resolves.toBeUndefined();
-    });
-  });
-}
-
-conformance("MemoryMessageQueue", () => new MemoryMessageQueue());
-conformance("NoopMessageQueue", () => new NoopMessageQueue());
-
-describe.skipIf(!REDIS_URL)("RedisMessageQueue (live)", () => {
-  conformance("RedisMessageQueue", redisQueue);
-
-  it("delivers a published message to a subscriber", async () => {
-    const mq = redisQueue();
-    const received = new Promise<Message>((resolve) => {
-      void mq.subscribe("topic", (message) => {
-        resolve(message);
-        return Promise.resolve();
-      });
-    });
-
-    // Give the consumer-group read loop a beat to park before publishing.
-    await new Promise((r) => setTimeout(r, 100));
-    await mq.publish("topic", { id: "1", body: "hello", attributes: { k: "v" } });
-
-    const message = await received;
-    expect(message).toEqual({ id: "1", body: "hello", attributes: { k: "v" } });
-  });
-
-  it("stops delivery after unsubscribe", async () => {
-    const mq = redisQueue();
-    const handler = vi.fn(() => Promise.resolve());
-
-    const sub = await mq.subscribe("topic", handler);
-    await sub.unsubscribe();
-    await mq.publish("topic", { id: "1", body: "hello" });
-    await new Promise((r) => setTimeout(r, 300));
-
-    expect(handler).not.toHaveBeenCalled();
-  });
-});
-
-describe("MemoryMessageQueue delivery", () => {
-  it("delivers a published message to a subscriber", async () => {
-    const mq = new MemoryMessageQueue();
-    const handler = vi.fn(() => Promise.resolve());
-
-    await mq.subscribe("topic", handler);
-    await mq.publish("topic", { id: "1", body: "hello" });
-
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler).toHaveBeenCalledWith({ id: "1", body: "hello" });
-  });
-
-  it("delivers to every subscriber of a topic", async () => {
-    const mq = new MemoryMessageQueue();
-    const first = vi.fn(() => Promise.resolve());
-    const second = vi.fn(() => Promise.resolve());
-
-    await mq.subscribe("topic", first);
-    await mq.subscribe("topic", second);
-    await mq.publish("topic", { id: "1", body: "hello" });
-
-    expect(first).toHaveBeenCalledTimes(1);
-    expect(second).toHaveBeenCalledTimes(1);
-  });
-
-  it("stops delivery after unsubscribe", async () => {
-    const mq = new MemoryMessageQueue();
-    const handler = vi.fn(() => Promise.resolve());
-
-    const sub = await mq.subscribe("topic", handler);
-    await sub.unsubscribe();
-    await mq.publish("topic", { id: "1", body: "hello" });
-
-    expect(handler).not.toHaveBeenCalled();
-  });
-
-  it("generates an id when none is supplied", async () => {
-    const mq = new MemoryMessageQueue();
-    const received: string[] = [];
-
-    await mq.subscribe("topic", (message) => {
-      received.push(message.id);
+    const received: unknown[] = [];
+    const consumer = await consumers.provideConsumer("topic", (data) => {
+      received.push(decode(data));
       return Promise.resolve();
     });
-    await mq.publish("topic", { body: "hello" });
 
-    expect(received).toHaveLength(1);
-    expect(received[0]).toMatch(/[0-9a-f-]{36}/);
+    const stop = new AbortController();
+    void consumer.consume(stop.signal);
+
+    const publisher = await publishers.providePublisher("topic");
+    await publisher.publish({ hello: "world" });
+
+    expect(received).toEqual([{ hello: "world" }]);
+    stop.abort();
   });
 
-  it("carries attributes through to the subscriber", async () => {
-    const mq = new MemoryMessageQueue();
+  it("reports handler errors through onError without throwing to the publisher", async () => {
+    const broker = new MemoryBroker();
+    const consumers = new MemoryConsumerProvider(broker);
+    const publishers = new MemoryPublisherProvider(broker);
+
+    const boom = new Error("handler blew up");
+    const errors: unknown[] = [];
+    const consumer = await consumers.provideConsumer("topic", () => Promise.reject(boom));
+
+    const stop = new AbortController();
+    void consumer.consume(stop.signal, (err) => errors.push(err));
+
+    const publisher = await publishers.providePublisher("topic");
+    await expect(publisher.publish({ n: 1 })).resolves.toBeUndefined();
+
+    expect(errors).toEqual([boom]);
+    stop.abort();
+  });
+
+  it("stops delivery once the consume signal aborts", async () => {
+    const broker = new MemoryBroker();
     const handler = vi.fn(() => Promise.resolve());
+    const consumer = await new MemoryConsumerProvider(broker).provideConsumer(
+      "topic",
+      handler,
+    );
+    const publisher = await new MemoryPublisherProvider(broker).providePublisher("topic");
 
-    await mq.subscribe("topic", handler);
-    await mq.publish("topic", { id: "1", body: "hello", attributes: { k: "v" } });
+    const stop = new AbortController();
+    const done = consumer.consume(stop.signal);
+    stop.abort();
+    await done;
 
-    expect(handler).toHaveBeenCalledWith({
-      id: "1",
-      body: "hello",
-      attributes: { k: "v" },
-    });
+    await publisher.publish({ n: 1 });
+    expect(handler).not.toHaveBeenCalled();
   });
 });
 
-describe("provideMessageQueue", () => {
+describe("empty topic", () => {
+  it("rejects providePublisher with ErrEmptyTopicName", async () => {
+    await expect(new MemoryPublisherProvider().providePublisher("")).rejects.toBe(
+      ErrEmptyTopicName,
+    );
+  });
+
+  it("rejects provideConsumer with ErrEmptyTopicName", async () => {
+    await expect(
+      new MemoryConsumerProvider().provideConsumer("", () => Promise.resolve()),
+    ).rejects.toBe(ErrEmptyTopicName);
+  });
+});
+
+describe("noop providers", () => {
+  it("publishes and pings without throwing", async () => {
+    const provider: PublisherProvider = new NoopPublisherProvider();
+    const publisher = await provider.providePublisher("topic");
+    await expect(publisher.publish({ n: 1 })).resolves.toBeUndefined();
+    await expect(provider.ping()).resolves.toBeUndefined();
+    expect(() => {
+      publisher.publishAsync({ n: 1 });
+    }).not.toThrow();
+    expect(() => {
+      provider.close();
+    }).not.toThrow();
+  });
+
+  it("consume resolves once aborted", async () => {
+    const provider: ConsumerProvider = new NoopConsumerProvider();
+    const consumer = await provider.provideConsumer("topic", () => Promise.resolve());
+    const stop = new AbortController();
+    const done = consumer.consume(stop.signal);
+    stop.abort();
+    await expect(done).resolves.toBeUndefined();
+  });
+});
+
+describe("publishAsync", () => {
+  it("swallows publish errors instead of rejecting", async () => {
+    const broker = new MemoryBroker();
+    const publisher = await new MemoryPublisherProvider(broker).providePublisher("topic");
+
+    // A value with a circular reference makes JSON encoding throw inside publish.
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    expect(() => {
+      publisher.publishAsync(circular);
+    }).not.toThrow();
+    await tick();
+  });
+});
+
+describe("providePublisherProvider", () => {
   it("defaults to the memory provider", () => {
-    expect(provideMessageQueue(undefined, {})).toBeInstanceOf(MemoryMessageQueue);
+    expect(providePublisherProvider(undefined, {})).toBeInstanceOf(
+      MemoryPublisherProvider,
+    );
   });
 
   it("builds a noop provider", () => {
-    expect(provideMessageQueue({ provider: "noop" })).toBeInstanceOf(NoopMessageQueue);
+    expect(providePublisherProvider({ provider: "noop" })).toBeInstanceOf(
+      NoopPublisherProvider,
+    );
   });
 
   it("builds a redis provider when configured", () => {
     expect(
-      provideMessageQueue({
+      providePublisherProvider({
         provider: "redis",
-        redis: { url: "redis://localhost:6379" },
+        redis: { queueAddresses: ["localhost:6379"] },
       }),
-    ).toBeInstanceOf(RedisMessageQueue);
+    ).toBeInstanceOf(RedisPublisherProvider);
   });
 
-  it("rejects the redis provider without redis config", () => {
-    expect(() => provideMessageQueue({ provider: "redis" })).toThrow();
+  it("builds an sqs provider", () => {
+    expect(providePublisherProvider({ provider: "sqs" })).toBeInstanceOf(
+      SQSPublisherProvider,
+    );
+  });
+
+  it("builds a pubsub provider when configured", () => {
+    expect(
+      providePublisherProvider({ provider: "pubsub", pubsub: { projectId: "p" } }),
+    ).toBeInstanceOf(PubSubPublisherProvider);
+  });
+
+  it("builds a kafka provider when configured", () => {
+    expect(
+      providePublisherProvider({
+        provider: "kafka",
+        kafka: { brokers: ["localhost:9092"] },
+      }),
+    ).toBeInstanceOf(KafkaPublisherProvider);
+  });
+
+  it("rejects redis/pubsub/kafka without their config block", () => {
+    expect(() => providePublisherProvider({ provider: "redis" })).toThrow();
+    expect(() => providePublisherProvider({ provider: "pubsub" })).toThrow();
+    expect(() => providePublisherProvider({ provider: "kafka" })).toThrow();
+  });
+});
+
+describe("provideConsumerProvider", () => {
+  it("defaults to the memory provider", () => {
+    expect(provideConsumerProvider(undefined, {})).toBeInstanceOf(MemoryConsumerProvider);
+  });
+
+  it("builds each configured provider", () => {
+    expect(provideConsumerProvider({ provider: "noop" })).toBeInstanceOf(
+      NoopConsumerProvider,
+    );
+    expect(provideConsumerProvider({ provider: "sqs" })).toBeInstanceOf(
+      SQSConsumerProvider,
+    );
+    expect(
+      provideConsumerProvider({
+        provider: "redis",
+        redis: { queueAddresses: ["localhost:6379"] },
+      }),
+    ).toBeInstanceOf(RedisConsumerProvider);
+    expect(
+      provideConsumerProvider({ provider: "pubsub", pubsub: { projectId: "p" } }),
+    ).toBeInstanceOf(PubSubConsumerProvider);
+    expect(
+      provideConsumerProvider({
+        provider: "kafka",
+        kafka: { brokers: ["localhost:9092"] },
+      }),
+    ).toBeInstanceOf(KafkaConsumerProvider);
+  });
+});
+
+/**
+ * Live Redis PUB/SUB integration is opt-in: set MESSAGEQUEUE_TEST_REDIS_ADDR to a reachable
+ * `host:port` (e.g. localhost:6379). The default offline run skips it and stays green.
+ */
+const REDIS_ADDR = process.env.MESSAGEQUEUE_TEST_REDIS_ADDR;
+
+describe.skipIf(!REDIS_ADDR)("Redis PUB/SUB (live)", () => {
+  it("delivers a published message across publisher and consumer providers", async () => {
+    const options = { queueAddresses: [REDIS_ADDR ?? "localhost:6379"] };
+    const topic = `mqtest:${Math.trunc(performance.now()).toString()}`;
+
+    const consumers = new RedisConsumerProvider(options);
+    const publishers = new RedisPublisherProvider(options);
+
+    const received = new Promise<unknown>((resolve) => {
+      void consumers
+        .provideConsumer(topic, (data) => {
+          resolve(decode(data));
+          return Promise.resolve();
+        })
+        .then((consumer) => consumer.consume(new AbortController().signal));
+    });
+
+    await tick();
+    const publisher = await publishers.providePublisher(topic);
+    // Give the SUBSCRIBE a beat to land before publishing.
+    await new Promise((r) => setTimeout(r, 100));
+    await publisher.publish({ hello: "redis" });
+
+    expect(await received).toEqual({ hello: "redis" });
+    publishers.close();
   });
 });

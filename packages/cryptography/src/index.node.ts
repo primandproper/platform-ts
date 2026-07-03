@@ -10,6 +10,7 @@ import type { Encryptor } from "./encryption.js";
 import type { Hasher } from "./hashing.js";
 import { AesGcmEncryptor } from "./providers/aes-gcm.js";
 import { PassthroughEncryptor } from "./providers/passthrough.js";
+import { Salsa20Encryptor } from "./providers/salsa20.js";
 import { SubtleHasher } from "./providers/subtle-hasher.js";
 
 export * from "./base64.js";
@@ -18,12 +19,14 @@ export * from "./encryption.js";
 export * from "./hashing.js";
 export { AesGcmEncryptor, importAesGcmKey } from "./providers/aes-gcm.js";
 export { PassthroughEncryptor } from "./providers/passthrough.js";
+export { Salsa20Encryptor } from "./providers/salsa20.js";
 export { SubtleHasher } from "./providers/subtle-hasher.js";
 
 /**
  * Node default factory: validates config and returns the matching {@link Encryptor}. Mirrors
- * the Go platform's `Provide*`. Supports `aes-gcm` (default) and `passthrough` (tests only).
- * Built on WebCrypto, so this factory is identical to the browser entry — portable call-sites.
+ * the Go platform's `Provide*`. Supports `aes-gcm` (default), `salsa20`, and `passthrough`
+ * (tests only). Built on WebCrypto + noble, so this factory is identical to the browser
+ * entry — portable call-sites.
  */
 export function provideEncryption(
   config?: EncryptionConfigInput,
@@ -37,6 +40,11 @@ export function provideEncryption(
         throw new Error("key is required when provider is 'aes-gcm'");
       }
       return new AesGcmEncryptor({ key: cfg.key }, deps);
+    case "salsa20":
+      if (cfg.key === undefined) {
+        throw new Error("key is required when provider is 'salsa20'");
+      }
+      return new Salsa20Encryptor({ key: cfg.key }, deps);
     case "passthrough":
       return new PassthroughEncryptor();
   }
