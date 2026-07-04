@@ -3,16 +3,10 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { MemoryTextIndex } from "./providers/memory-text.js";
-import { MemoryVectorIndex } from "./providers/memory-vector.js";
-import { NoopTextIndex, NoopVectorIndex } from "./providers/noop.js";
+import { NoopTextIndex } from "./providers/noop.js";
 import { TypesenseTextIndex } from "./providers/typesense.node.js";
 
-import {
-  provideTextIndex,
-  provideVectorIndex,
-  type TextIndex,
-  type VectorIndex,
-} from "./index.js";
+import { provideTextIndex, type TextIndex } from "./index.js";
 
 /**
  * Live-Typesense integration is opt-in: set SEARCH_TEST_TYPESENSE_URL (e.g.
@@ -160,76 +154,6 @@ describe("NoopTextIndex", () => {
   });
 });
 
-async function seedVectors(index: VectorIndex): Promise<void> {
-  await index.upsert({ id: "x", vector: [1, 0, 0] });
-  await index.upsert({ id: "y", vector: [0, 1, 0] });
-  await index.upsert({ id: "z", vector: [0.9, 0.1, 0] });
-}
-
-describe("MemoryVectorIndex", () => {
-  it("ranks the nearest document by cosine first", async () => {
-    const index = new MemoryVectorIndex();
-    await seedVectors(index);
-
-    const hits = await index.query([1, 0, 0], 3);
-    expect(hits[0]?.id).toBe("x");
-    expect(hits[1]?.id).toBe("z");
-  });
-
-  it("respects k", async () => {
-    const index = new MemoryVectorIndex();
-    await seedVectors(index);
-
-    const hits = await index.query([1, 0, 0], 1);
-    expect(hits).toHaveLength(1);
-    expect(hits[0]?.id).toBe("x");
-  });
-
-  it("treats a zero-norm query as zero similarity", async () => {
-    const index = new MemoryVectorIndex();
-    await seedVectors(index);
-
-    const hits = await index.query([0, 0, 0], 3);
-    expect(hits.every((h) => h.score === 0)).toBe(true);
-  });
-
-  it("returns metadata on hits", async () => {
-    const index = new MemoryVectorIndex();
-    await index.upsert({ id: "x", vector: [1, 0], metadata: { tag: "x" } });
-
-    const hits = await index.query([1, 0], 1);
-    expect(hits[0]?.metadata).toEqual({ tag: "x" });
-  });
-
-  it("removes a document on delete", async () => {
-    const index = new MemoryVectorIndex();
-    await seedVectors(index);
-    await index.delete("x");
-
-    const hits = await index.query([1, 0, 0], 3);
-    expect(hits.map((h) => h.id)).not.toContain("x");
-  });
-
-  it("throws on a dimension mismatch", async () => {
-    const index = new MemoryVectorIndex();
-    await index.upsert({ id: "x", vector: [1, 0, 0] });
-
-    await expect(index.query([1, 0], 1)).rejects.toThrow(/dimension/);
-  });
-
-  it("pings without throwing", async () => {
-    await expect(new MemoryVectorIndex().ping()).resolves.toBeUndefined();
-  });
-});
-
-describe("NoopVectorIndex", () => {
-  it("returns no hits", async () => {
-    const index: VectorIndex = new NoopVectorIndex();
-    await index.upsert({ id: "x", vector: [1, 0, 0] });
-    expect(await index.query([1, 0, 0], 3)).toEqual([]);
-  });
-});
-
 describe("provideTextIndex", () => {
   it("defaults to the memory provider", () => {
     expect(provideTextIndex(undefined, {})).toBeInstanceOf(MemoryTextIndex);
@@ -249,15 +173,5 @@ describe("provideTextIndex", () => {
 
   it("rejects a typesense provider without its config", () => {
     expect(() => provideTextIndex({ provider: "typesense" })).toThrow(/typesense/);
-  });
-});
-
-describe("provideVectorIndex", () => {
-  it("defaults to the memory provider", () => {
-    expect(provideVectorIndex(undefined, {})).toBeInstanceOf(MemoryVectorIndex);
-  });
-
-  it("builds a noop provider", () => {
-    expect(provideVectorIndex({ provider: "noop" })).toBeInstanceOf(NoopVectorIndex);
   });
 });

@@ -10,8 +10,7 @@
     "directory": "packages/circuitbreaking"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "exports": {
     ".": {

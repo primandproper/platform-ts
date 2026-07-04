@@ -4,29 +4,23 @@ import type { ObservabilityDeps } from "@primandproper/observability";
 import {
   DocumentIndexConfigSchema,
   TextSearchConfigSchema,
-  VectorSearchConfigSchema,
   type DocumentIndexConfigInput,
   type TextSearchConfigInput,
-  type VectorSearchConfigInput,
 } from "./config.js";
 import type { DocumentIndex } from "./document-index.js";
 import { AlgoliaDocumentIndex } from "./providers/algolia.node.js";
 import { ElasticsearchDocumentIndex } from "./providers/elasticsearch.node.js";
 import { MemoryTextIndex } from "./providers/memory-text.js";
-import { MemoryVectorIndex } from "./providers/memory-vector.js";
 import { NoopDocumentIndex } from "./providers/noop-document-index.js";
-import { NoopTextIndex, NoopVectorIndex } from "./providers/noop.js";
+import { NoopTextIndex } from "./providers/noop.js";
 import { TypesenseTextIndex } from "./providers/typesense.node.js";
 import type { TextIndex } from "./text.js";
-import type { VectorIndex } from "./vector.js";
 
 export * from "./text.js";
-export * from "./vector.js";
 export * from "./document-index.js";
 export * from "./config.js";
 export { MemoryTextIndex } from "./providers/memory-text.js";
-export { MemoryVectorIndex } from "./providers/memory-vector.js";
-export { NoopTextIndex, NoopVectorIndex } from "./providers/noop.js";
+export { NoopTextIndex } from "./providers/noop.js";
 export { NoopDocumentIndex } from "./providers/noop-document-index.js";
 export {
   AlgoliaDocumentIndex,
@@ -71,23 +65,6 @@ export function provideTextIndex(
         },
         deps,
       );
-  }
-}
-
-/**
- * Validates config and returns the matching {@link VectorIndex}. Mirrors the Go platform's
- * `Provide*`. Supports `memory` (default) and `noop`.
- */
-export function provideVectorIndex(
-  config?: VectorSearchConfigInput,
-  deps?: ObservabilityDeps,
-): VectorIndex {
-  const cfg = VectorSearchConfigSchema.parse(config ?? {});
-  switch (cfg.provider) {
-    case "memory":
-      return new MemoryVectorIndex(deps);
-    case "noop":
-      return new NoopVectorIndex();
   }
 }
 

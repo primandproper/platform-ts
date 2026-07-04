@@ -13,4 +13,8 @@ export class NoopSecretSource implements SecretSource {
   ping(): Promise<void> {
     return Promise.resolve();
   }
+
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
 }

@@ -1,60 +1,85 @@
+import { CircuitBreakerConfigSchema } from "@primandproper/circuitbreaking";
 import { z } from "zod";
 
-/** Filesystem-provider config: blobs are written under `dir`. */
-export const FilesystemUploadsConfigSchema = z.object({
-  dir: z.string(),
-});
+/** Provider identifiers, mirroring Go's per-adapter provider constants. */
+export const S3_PROVIDER = "s3";
+export const FILESYSTEM_PROVIDER = "filesystem";
+export const MEMORY_PROVIDER = "memory";
+export const GCP_PROVIDER = "gcp";
+export const R2_PROVIDER = "r2";
+export const BACKBLAZE_B2_PROVIDER = "backblaze_b2";
 
-export type FilesystemUploadsConfig = z.infer<typeof FilesystemUploadsConfigSchema>;
+/** Filesystem-provider config: blobs are written under `rootDirectory`. */
+export const FilesystemConfigSchema = z.object({
+  rootDirectory: z.string(),
+});
+export type FilesystemConfig = z.infer<typeof FilesystemConfigSchema>;
 
 /**
- * S3-provider config: blobs live in `bucket`. `endpoint` and `forcePathStyle` point the
- * client at an S3-compatible service (MinIO, LocalStack); omit them for AWS. `credentials`
- * are optional — omit them to let the SDK resolve its default chain.
+ * Cloudflare R2 config — an S3-compatible endpoint keyed by account, with static credentials.
+ * The bucket to open is the top-level `bucketName`, mirroring Go's single `BucketName` field.
  */
-export const S3UploadsConfigSchema = z.object({
-  bucket: z.string(),
-  region: z.string().default("us-east-1"),
-  endpoint: z.string().optional(),
-  forcePathStyle: z.boolean().default(false),
-  credentials: z
-    .object({
-      accessKeyId: z.string(),
-      secretAccessKey: z.string(),
-      sessionToken: z.string().optional(),
-    })
-    .optional(),
+export const R2ConfigSchema = z.object({
+  accountID: z.string(),
+  accessKeyID: z.string(),
+  secretAccessKey: z.string(),
 });
+export type R2Config = z.infer<typeof R2ConfigSchema>;
 
-export type S3UploadsConfig = z.infer<typeof S3UploadsConfigSchema>;
+/** Backblaze B2 config — an S3-compatible endpoint keyed by region, with application keys. */
+export const BackblazeB2ConfigSchema = z.object({
+  applicationKeyID: z.string(),
+  applicationKey: z.string(),
+  region: z.string(),
+});
+export type BackblazeB2Config = z.infer<typeof BackblazeB2ConfigSchema>;
 
 /**
- * Uploads config. Replaces the Go `env:`-tagged struct + ozzo `ValidateWithContext`.
- * `memory` (default) keeps blobs in a `Map`; `filesystem` writes them under a base `dir`;
- * `s3` stores them in an S3 (or S3-compatible) bucket; `noop` discards them. S3 needs the
- * `@aws-sdk/client-s3` SDK and stays server-side.
+ * Upload-manager config. Replaces the Go `env:`-tagged struct + ozzo `ValidateWithContext`.
+ *
+ * `bucketName` names the manager for metrics/tracing (`<bucketName>_uploader`), is the bucket
+ * every backend opens, and is required. `bucketPrefix`, when set, is transparently prepended to
+ * every key (Go's `blob.PrefixedBucket`). `circuitBreaker` feeds `@primandproper/circuitbreaking`'s
+ * `provideCircuitBreaker`. `memory` (default) keeps blobs in a `Map`; `filesystem` writes under a
+ * root dir; `s3` and `gcp` resolve ambient credentials; `r2`/`backblaze_b2` speak S3 via a custom
+ * endpoint and so carry their own credentials.
  */
 export const UploadsConfigSchema = z
   .object({
-    provider: z.enum(["memory", "filesystem", "s3", "noop"]).default("memory"),
-    filesystem: FilesystemUploadsConfigSchema.optional(),
-    s3: S3UploadsConfigSchema.optional(),
+    provider: z
+      .enum([
+        MEMORY_PROVIDER,
+        FILESYSTEM_PROVIDER,
+        S3_PROVIDER,
+        GCP_PROVIDER,
+        R2_PROVIDER,
+        BACKBLAZE_B2_PROVIDER,
+      ])
+      .default(MEMORY_PROVIDER),
+    bucketName: z.string().min(1, "bucketName is required"),
+    bucketPrefix: z.string().default(""),
+    filesystem: FilesystemConfigSchema.optional(),
+    r2: R2ConfigSchema.optional(),
+    backblazeB2: BackblazeB2ConfigSchema.optional(),
+    circuitBreaker: CircuitBreakerConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
-    if (cfg.provider === "filesystem" && cfg.filesystem === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["filesystem"],
-        message: "filesystem config is required when provider is 'filesystem'",
-      });
-    }
-    if (cfg.provider === "s3" && cfg.s3 === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["s3"],
-        message: "s3 config is required when provider is 's3'",
-      });
-    }
+    const requireSub = (
+      provider: string,
+      key: "filesystem" | "r2" | "backblazeB2",
+      present: boolean,
+    ): void => {
+      if (cfg.provider === provider && !present) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} config is required when provider is '${provider}'`,
+        });
+      }
+    };
+    requireSub(FILESYSTEM_PROVIDER, "filesystem", cfg.filesystem !== undefined);
+    requireSub(R2_PROVIDER, "r2", cfg.r2 !== undefined);
+    requireSub(BACKBLAZE_B2_PROVIDER, "backblazeB2", cfg.backblazeB2 !== undefined);
   });
 
 export type UploadsConfig = z.infer<typeof UploadsConfigSchema>;

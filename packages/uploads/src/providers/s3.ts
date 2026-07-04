@@ -1,112 +1,81 @@
 import {
   DeleteObjectCommand,
   GetObjectCommand,
-  HeadBucketCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
   type S3ClientConfig,
 } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { wrap } from "@primandproper/errors";
-import {
-  makeObserver,
-  type Logger,
-  type ObservabilityDeps,
-  type Observer,
-} from "@primandproper/observability";
 
-import type { Blob, BlobStore, PutOptions } from "../uploads.js";
-
-const o11yName = "uploads";
-
-export interface S3BlobStoreOptions {
-  /** The bucket every object is stored under. */
-  bucket: string;
-  /** The AWS region. Required by the SDK; ignored when a custom `endpoint` is set. */
-  region: string;
-  /**
-   * Overrides the S3 endpoint — point this at MinIO, LocalStack, or another
-   * S3-compatible service. Defaults to AWS's regional endpoint.
-   */
-  endpoint?: string | undefined;
-  /**
-   * Forces path-style addressing (`endpoint/bucket/key`) instead of virtual-hosted
-   * (`bucket.endpoint/key`). Required by most non-AWS S3-compatible services.
-   */
-  forcePathStyle?: boolean | undefined;
-  /** Static credentials. Omit to let the SDK resolve them from its default chain. */
-  credentials?:
-    | {
-        accessKeyId: string;
-        secretAccessKey: string;
-        sessionToken?: string | undefined;
-      }
-    | undefined;
-  /** A preconstructed client, mainly for tests. Takes precedence over the other options. */
-  client?: S3Client | undefined;
-}
+import { BlobNotFoundError, type Bucket } from "../bucket.js";
+import type { Attributes, ObjectInfo, SignedURLOptions } from "../capabilities.js";
+import type { BackblazeB2Config, R2Config } from "../config.js";
+import { toBytes, type BlobBody } from "../stream.js";
+import type { SaveOptions } from "../uploads.js";
 
 /**
- * A {@link BlobStore} backed by Amazon S3 (or any S3-compatible service via `endpoint`).
- * A missing object reads back as `undefined` rather than a sentinel error; every other
- * SDK failure is rethrown wrapped with context.
+ * A {@link Bucket} backed by S3 or any S3-compatible service. The port of gocloud's `s3blob`,
+ * and — as in platform-go, where R2 and Backblaze B2 also open through `s3blob` with a custom
+ * endpoint — the single implementation behind the `s3`, `r2`, and `backblaze_b2` providers.
+ *
+ * Reads stream (so ranged reads never buffer a whole object), but a write drains its body first:
+ * a single `PutObject` needs a known length, and pulling in `@aws-sdk/lib-storage` for multipart
+ * streaming isn't worth it here. A missing object is normalized to {@link BlobNotFoundError};
+ * every other SDK failure is rethrown wrapped with context.
  */
-export class S3BlobStore implements BlobStore {
+export class S3Bucket implements Bucket {
   readonly #client: S3Client;
   readonly #bucket: string;
-  readonly #observer: Observer;
-  readonly #logger: Logger;
 
-  constructor(options: S3BlobStoreOptions, deps: ObservabilityDeps = {}) {
-    this.#bucket = options.bucket;
-    this.#observer = deps.observer ?? makeObserver(o11yName, deps);
-    this.#logger = this.#observer.logger();
-    this.#client = options.client ?? new S3Client(toClientConfig(options));
+  constructor(client: S3Client, bucketName: string) {
+    this.#client = client;
+    this.#bucket = bucketName;
   }
 
-  async put(key: string, body: Uint8Array, opts: PutOptions = {}): Promise<void> {
+  async write(key: string, body: BlobBody, opts?: SaveOptions): Promise<void> {
     try {
       await this.#client.send(
         new PutObjectCommand({
           Bucket: this.#bucket,
           Key: key,
-          Body: body,
-          ContentType: opts.contentType,
+          Body: await toBytes(body),
+          ContentType: opts?.contentType,
+          CacheControl: opts?.cacheControl,
         }),
       );
-    } catch (error) {
-      throw wrap(`s3 put failed for key '${key}'`, error);
+    } catch (err) {
+      throw wrap(`s3 write failed for key '${key}'`, err);
     }
   }
 
-  async get(key: string): Promise<Blob | undefined> {
+  async openRange(
+    key: string,
+    offset: number,
+    length: number,
+  ): Promise<ReadableStream<Uint8Array>> {
     let response;
     try {
       response = await this.#client.send(
-        new GetObjectCommand({ Bucket: this.#bucket, Key: key }),
+        new GetObjectCommand({
+          Bucket: this.#bucket,
+          Key: key,
+          Range: rangeHeader(offset, length),
+        }),
       );
-    } catch (error) {
-      if (isNotFound(error)) {
-        this.#logger.debug("blob not found");
-        return undefined;
+    } catch (err) {
+      if (isNotFound(err)) {
+        throw new BlobNotFoundError(key);
       }
-      throw wrap(`s3 get failed for key '${key}'`, error);
+      throw wrap(`s3 read failed for key '${key}'`, err);
     }
 
     if (response.Body === undefined) {
-      return undefined;
+      throw new BlobNotFoundError(key);
     }
-
-    let body: Uint8Array;
-    try {
-      body = await response.Body.transformToByteArray();
-    } catch (error) {
-      throw wrap(`s3 get failed for key '${key}'`, error);
-    }
-
-    return response.ContentType === undefined
-      ? { body }
-      : { body, contentType: response.ContentType };
+    return response.Body.transformToWebStream();
   }
 
   async delete(key: string): Promise<void> {
@@ -114,8 +83,8 @@ export class S3BlobStore implements BlobStore {
       await this.#client.send(
         new DeleteObjectCommand({ Bucket: this.#bucket, Key: key }),
       );
-    } catch (error) {
-      throw wrap(`s3 delete failed for key '${key}'`, error);
+    } catch (err) {
+      throw wrap(`s3 delete failed for key '${key}'`, err);
     }
   }
 
@@ -123,56 +92,141 @@ export class S3BlobStore implements BlobStore {
     try {
       await this.#client.send(new HeadObjectCommand({ Bucket: this.#bucket, Key: key }));
       return true;
-    } catch (error) {
-      if (isNotFound(error)) {
+    } catch (err) {
+      if (isNotFound(err)) {
         return false;
       }
-      throw wrap(`s3 exists failed for key '${key}'`, error);
+      throw wrap(`s3 exists check failed for key '${key}'`, err);
     }
   }
 
-  async ping(): Promise<void> {
+  async attributes(key: string): Promise<Attributes> {
+    let head;
     try {
-      await this.#client.send(new HeadBucketCommand({ Bucket: this.#bucket }));
-    } catch (error) {
-      throw wrap(`s3 ping failed for key '${this.#bucket}'`, error);
+      head = await this.#client.send(
+        new HeadObjectCommand({ Bucket: this.#bucket, Key: key }),
+      );
+    } catch (err) {
+      if (isNotFound(err)) {
+        throw new BlobNotFoundError(key);
+      }
+      throw wrap(`s3 attributes fetch failed for key '${key}'`, err);
+    }
+    return {
+      size: head.ContentLength ?? 0,
+      ...(head.ContentType !== undefined && { contentType: head.ContentType }),
+      ...(head.CacheControl !== undefined && { cacheControl: head.CacheControl }),
+      ...(head.ETag !== undefined && { etag: head.ETag }),
+      ...(head.LastModified !== undefined && { modTime: head.LastModified }),
+    };
+  }
+
+  async *list(prefix: string): AsyncIterable<ObjectInfo> {
+    let continuationToken: string | undefined;
+    do {
+      let page;
+      try {
+        page = await this.#client.send(
+          new ListObjectsV2Command({
+            Bucket: this.#bucket,
+            Prefix: prefix,
+            ContinuationToken: continuationToken,
+          }),
+        );
+      } catch (err) {
+        throw wrap(`s3 list failed for prefix '${prefix}'`, err);
+      }
+      for (const obj of page.Contents ?? []) {
+        if (obj.Key === undefined) {
+          continue;
+        }
+        yield {
+          path: obj.Key,
+          size: obj.Size ?? 0,
+          isDir: false,
+          ...(obj.LastModified !== undefined && { modTime: obj.LastModified }),
+        };
+      }
+      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (continuationToken !== undefined);
+  }
+
+  async signedURL(key: string, opts?: SignedURLOptions): Promise<string> {
+    const method = opts?.method ?? "GET";
+    const command =
+      method === "PUT"
+        ? new PutObjectCommand({
+            Bucket: this.#bucket,
+            Key: key,
+            ContentType: opts?.contentType,
+          })
+        : method === "DELETE"
+          ? new DeleteObjectCommand({ Bucket: this.#bucket, Key: key })
+          : new GetObjectCommand({ Bucket: this.#bucket, Key: key });
+
+    const expiresIn =
+      opts?.expiry !== undefined && opts.expiry > 0
+        ? Math.ceil(opts.expiry / 1000)
+        : undefined;
+    try {
+      return await getSignedUrl(
+        this.#client,
+        command,
+        expiresIn !== undefined ? { expiresIn } : {},
+      );
+    } catch (err) {
+      throw wrap(`s3 signing failed for key '${key}'`, err);
     }
   }
 }
 
-/** Maps store options onto the S3 client constructor config, dropping undefined keys. */
-function toClientConfig(options: S3BlobStoreOptions): S3ClientConfig {
+/** Opens a plain S3 bucket, letting the SDK resolve region/credentials from its default chain. */
+export function newS3Bucket(bucketName: string): S3Bucket {
+  return new S3Bucket(new S3Client({}), bucketName);
+}
+
+/** Opens a Cloudflare R2 bucket via its account-scoped S3 endpoint with static credentials. */
+export function newR2Bucket(cfg: R2Config, bucketName: string): S3Bucket {
   const config: S3ClientConfig = {
-    region: options.region,
+    endpoint: `https://${cfg.accountID}.r2.cloudflarestorage.com`,
+    region: "auto",
+    credentials: {
+      accessKeyId: cfg.accessKeyID,
+      secretAccessKey: cfg.secretAccessKey,
+    },
   };
-  if (options.endpoint !== undefined) {
-    config.endpoint = options.endpoint;
+  return new S3Bucket(new S3Client(config), bucketName);
+}
+
+/** Opens a Backblaze B2 bucket via its region-scoped S3 endpoint with an application key. */
+export function newBackblazeBucket(cfg: BackblazeB2Config, bucketName: string): S3Bucket {
+  const config: S3ClientConfig = {
+    endpoint: `https://s3.${cfg.region}.backblazeb2.com`,
+    region: cfg.region,
+    credentials: {
+      accessKeyId: cfg.applicationKeyID,
+      secretAccessKey: cfg.applicationKey,
+    },
+  };
+  return new S3Bucket(new S3Client(config), bucketName);
+}
+
+/** Builds an HTTP Range header, or `undefined` for a full read (offset 0, negative length). */
+function rangeHeader(offset: number, length: number): string | undefined {
+  if (offset === 0 && length < 0) {
+    return undefined;
   }
-  if (options.forcePathStyle !== undefined) {
-    config.forcePathStyle = options.forcePathStyle;
-  }
-  if (options.credentials !== undefined) {
-    const { accessKeyId, secretAccessKey, sessionToken } = options.credentials;
-    config.credentials =
-      sessionToken === undefined
-        ? { accessKeyId, secretAccessKey }
-        : { accessKeyId, secretAccessKey, sessionToken };
-  }
-  return config;
+  const start = String(offset);
+  return length < 0 ? `bytes=${start}-` : `bytes=${start}-${String(offset + length - 1)}`;
 }
 
 /** True when the SDK error signals an absent object (404 / NoSuchKey / NotFound). */
-function isNotFound(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) {
+function isNotFound(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) {
     return false;
   }
-  const name = (error as { name?: unknown }).name;
-  const status = (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata
+  const name = (err as { name?: unknown }).name;
+  const status = (err as { $metadata?: { httpStatusCode?: unknown } }).$metadata
     ?.httpStatusCode;
-  return (
-    name === "NoSuchKey" ||
-    name === "NotFound" ||
-    name === "NoSuchBucket" ||
-    status === 404
-  );
+  return name === "NoSuchKey" || name === "NotFound" || status === 404;
 }

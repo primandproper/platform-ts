@@ -40,18 +40,6 @@ export const TextSearchConfigSchema = z
 export type TextSearchConfig = z.infer<typeof TextSearchConfigSchema>;
 export type TextSearchConfigInput = z.input<typeof TextSearchConfigSchema>;
 
-/**
- * Vector search config. `memory` (default) keeps in-process vectors and ranks by cosine
- * similarity; `noop` indexes nothing. pgvector and Pinecone are documented as future
- * providers — they need provider SDKs or a database connection and stay server-side.
- */
-export const VectorSearchConfigSchema = z.object({
-  provider: z.enum(["memory", "noop"]).default("memory"),
-});
-
-export type VectorSearchConfig = z.infer<typeof VectorSearchConfigSchema>;
-export type VectorSearchConfigInput = z.input<typeof VectorSearchConfigSchema>;
-
 /** Algolia-provider config for the generic {@link import("./document-index.js").DocumentIndex}. */
 export const AlgoliaConfigSchema = z.object({
   /** Algolia application id. */

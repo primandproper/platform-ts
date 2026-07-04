@@ -10,8 +10,7 @@
     "directory": "packages/random"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "exports": {
     ".": {

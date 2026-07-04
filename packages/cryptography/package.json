@@ -10,8 +10,7 @@
     "directory": "packages/cryptography"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "exports": {
     ".": {

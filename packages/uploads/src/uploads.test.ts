@@ -2,65 +2,134 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { S3Client } from "@aws-sdk/client-s3";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { S3Client } from "@aws-sdk/client-s3";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { FilesystemBlobStore } from "./providers/filesystem.js";
-import { MemoryBlobStore } from "./providers/memory.js";
-import { NoopBlobStore } from "./providers/noop.js";
-import { S3BlobStore } from "./providers/s3.js";
+import { FilesystemBucket } from "./providers/filesystem.js";
+import { MemoryBucket } from "./providers/memory.js";
+import { NoopUploadManager } from "./providers/noop.js";
+import { S3Bucket } from "./providers/s3.js";
+import { bytesToStream, collectStream } from "./stream.js";
 
-import { provideUploads, type BlobStore } from "./index.js";
+import {
+  BlobNotFoundError,
+  PrefixedBucket,
+  SigningUnsupportedError,
+  isAttributer,
+  isLister,
+  isRangeReader,
+  isURLSigner,
+  listAll,
+  provideUploads,
+  readFile,
+  saveFile,
+  UploadsConfigSchema,
+  type Attributer,
+  type Bucket,
+  type Lister,
+  type UploadManager,
+  type URLSigner,
+} from "./index.js";
+
+const bytes = (...n: number[]): Uint8Array => new Uint8Array(n);
+
+async function read(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  return collectStream(stream);
+}
 
 /**
- * Provider-agnostic conformance suite. Running the same assertions against multiple
- * providers proves the `BlobStore` interface is implementation-independent.
+ * Provider-agnostic conformance suite over the {@link Bucket} seam. Running the same assertions
+ * against memory + filesystem proves the interface is implementation-independent.
  */
-function conformance(name: string, make: () => BlobStore): void {
+function bucketConformance(name: string, make: () => Bucket): void {
   describe(name, () => {
-    it("returns undefined for an unknown key", async () => {
-      expect(await make().get("missing")).toBeUndefined();
+    it("rejects opening an unknown key", async () => {
+      await expect(make().openRange("missing", 0, -1)).rejects.toBeInstanceOf(
+        BlobNotFoundError,
+      );
     });
 
-    it("round-trips bytes through put then get", async () => {
-      const store = make();
-      const body = new Uint8Array([1, 2, 3, 4]);
-      await store.put("a", body);
-      const blob = await store.get("a");
-      expect(blob?.body).toEqual(body);
+    it("round-trips bytes through write then open", async () => {
+      const b = make();
+      await b.write("a", bytes(1, 2, 3, 4));
+      expect(await read(await b.openRange("a", 0, -1))).toEqual(bytes(1, 2, 3, 4));
+    });
+
+    it("writes from a stream body", async () => {
+      const b = make();
+      await b.write("s", bytesToStream(bytes(9, 8, 7)));
+      expect(await read(await b.openRange("s", 0, -1))).toEqual(bytes(9, 8, 7));
+    });
+
+    it("reads a byte range", async () => {
+      const b = make();
+      await b.write("r", bytes(0, 1, 2, 3, 4, 5));
+      expect(await read(await b.openRange("r", 2, 3))).toEqual(bytes(2, 3, 4));
+    });
+
+    it("reads to the end with a negative length", async () => {
+      const b = make();
+      await b.write("r", bytes(0, 1, 2, 3, 4, 5));
+      expect(await read(await b.openRange("r", 4, -1))).toEqual(bytes(4, 5));
     });
 
     it("reflects state through exists", async () => {
-      const store = make();
-      expect(await store.exists("a")).toBe(false);
-      await store.put("a", new Uint8Array([1]));
-      expect(await store.exists("a")).toBe(true);
+      const b = make();
+      expect(await b.exists("a")).toBe(false);
+      await b.write("a", bytes(1));
+      expect(await b.exists("a")).toBe(true);
     });
 
-    it("removes a blob through delete", async () => {
-      const store = make();
-      await store.put("a", new Uint8Array([1]));
-      await store.delete("a");
-      expect(await store.exists("a")).toBe(false);
-      expect(await store.get("a")).toBeUndefined();
+    it("removes an object through delete", async () => {
+      const b = make();
+      await b.write("a", bytes(1));
+      await b.delete("a");
+      expect(await b.exists("a")).toBe(false);
     });
 
-    it("preserves contentType", async () => {
-      const store = make();
-      await store.put("a", new Uint8Array([1]), { contentType: "text/plain" });
-      const blob = await store.get("a");
-      expect(blob?.contentType).toBe("text/plain");
+    it("delete is a no-op on an absent key", async () => {
+      await expect(make().delete("nope")).resolves.toBeUndefined();
     });
 
-    it("pings without throwing", async () => {
-      await expect(make().ping()).resolves.toBeUndefined();
+    it("stores and reports attributes", async () => {
+      const b = make();
+      await b.write("a", bytes(1, 2, 3), {
+        contentType: "text/plain",
+        cacheControl: "max-age=60",
+      });
+      const attrs = await b.attributes("a");
+      expect(attrs.size).toBe(3);
+      expect(attrs.contentType).toBe("text/plain");
+      expect(attrs.cacheControl).toBe("max-age=60");
+    });
+
+    it("rejects attributes on an absent key", async () => {
+      await expect(make().attributes("missing")).rejects.toBeInstanceOf(
+        BlobNotFoundError,
+      );
+    });
+
+    it("lists objects under a prefix", async () => {
+      const b = make();
+      await b.write("data/a.txt", bytes(1));
+      await b.write("data/b.txt", bytes(2));
+      await b.write("other/c.txt", bytes(3));
+      const paths: string[] = [];
+      for await (const obj of b.list("data/")) {
+        paths.push(obj.path);
+      }
+      expect(paths.sort()).toEqual(["data/a.txt", "data/b.txt"]);
+    });
+
+    it("does not support signing", async () => {
+      await expect(make().signedURL("a")).rejects.toBeInstanceOf(SigningUnsupportedError);
     });
   });
 }
 
-conformance("MemoryBlobStore", () => new MemoryBlobStore());
+bucketConformance("MemoryBucket", () => new MemoryBucket());
 
-describe("FilesystemBlobStore", () => {
+describe("FilesystemBucket", () => {
   let root: string;
   let dir: string;
 
@@ -76,191 +145,219 @@ describe("FilesystemBlobStore", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  conformance("conformance", () => new FilesystemBlobStore({ dir }));
+  bucketConformance("conformance", () => new FilesystemBucket(dir));
 
   describe("key sanitization", () => {
-    it("rejects a traversal key on put", async () => {
-      const store = new FilesystemBlobStore({ dir });
-      await expect(store.put("../escape", new Uint8Array([1]))).rejects.toThrow();
-    });
-
-    it("rejects a traversal key on get", async () => {
-      const store = new FilesystemBlobStore({ dir });
-      await expect(store.get("../../etc/passwd")).rejects.toThrow();
+    it("rejects a traversal key on write", async () => {
+      await expect(
+        new FilesystemBucket(dir).write("../escape", bytes(1)),
+      ).rejects.toThrow();
     });
 
     it("rejects an absolute key", async () => {
-      const store = new FilesystemBlobStore({ dir });
-      await expect(store.put("/etc/passwd", new Uint8Array([1]))).rejects.toThrow();
+      await expect(
+        new FilesystemBucket(dir).write("/etc/passwd", bytes(1)),
+      ).rejects.toThrow();
     });
+  });
+
+  it("does not surface .attrs sidecars in listings", async () => {
+    const b = new FilesystemBucket(dir);
+    await b.write("note.txt", bytes(1), { contentType: "text/plain" });
+    const paths = (await listAll(b, "")).map((o) => o.path);
+    expect(paths).toEqual(["note.txt"]);
   });
 });
 
-describe("MemoryBlobStore copies bytes", () => {
+describe("MemoryBucket copies bytes", () => {
   it("does not store a reference to the caller's buffer", async () => {
-    const store = new MemoryBlobStore();
-    const body = new Uint8Array([1, 2, 3]);
-    await store.put("a", body);
+    const b = new MemoryBucket();
+    const body = bytes(1, 2, 3);
+    await b.write("a", body);
     body[0] = 99;
-    const blob = await store.get("a");
-    expect(blob?.body).toEqual(new Uint8Array([1, 2, 3]));
+    expect(await read(await b.openRange("a", 0, -1))).toEqual(bytes(1, 2, 3));
   });
 });
 
-describe("NoopBlobStore", () => {
-  it("discards writes and reads back nothing", async () => {
-    const store: BlobStore = new NoopBlobStore();
-    await store.put("a", new Uint8Array([1]));
-    expect(await store.get("a")).toBeUndefined();
-    expect(await store.exists("a")).toBe(false);
-    await expect(store.delete("a")).resolves.toBeUndefined();
-    await expect(store.ping()).resolves.toBeUndefined();
+describe("PrefixedBucket", () => {
+  it("prefixes keys and strips the prefix from listings", async () => {
+    const inner = new MemoryBucket();
+    const b = new PrefixedBucket(inner, "tenant-1/");
+
+    await b.write("a.txt", bytes(1));
+    expect(await inner.exists("tenant-1/a.txt")).toBe(true);
+    expect(await read(await b.openRange("a.txt", 0, -1))).toEqual(bytes(1));
+
+    const paths = (await listAll(b, "")).map((o) => o.path);
+    expect(paths).toEqual(["a.txt"]);
   });
 });
 
-/**
- * An in-memory stand-in for the AWS S3 client. It speaks the same command/response shapes
- * the provider relies on so the conformance suite can run offline; absent objects throw the
- * SDK's `NoSuchKey`/`NotFound` errors with a 404 in `$metadata`, exactly like the real client.
- */
-function fakeS3Client(): S3Client {
-  const objects = new Map<string, { body: Uint8Array; contentType?: string }>();
-
-  const notFound = (name: string): Error => {
-    const error = new Error(name) as Error & {
-      name: string;
-      $metadata: { httpStatusCode: number };
-    };
-    error.name = name;
-    error.$metadata = { httpStatusCode: 404 };
-    return error;
-  };
-
-  const send = (command: {
-    constructor: { name: string };
-    input: { Key?: string; Body?: Uint8Array; ContentType?: string };
-  }): Promise<unknown> => {
-    const { Key } = command.input;
-    switch (command.constructor.name) {
-      case "PutObjectCommand": {
-        const stored: { body: Uint8Array; contentType?: string } = {
-          body: (command.input.Body ?? new Uint8Array()).slice(),
-        };
-        if (command.input.ContentType !== undefined) {
-          stored.contentType = command.input.ContentType;
-        }
-        objects.set(Key ?? "", stored);
-        return Promise.resolve({});
-      }
-      case "GetObjectCommand": {
-        const stored = objects.get(Key ?? "");
-        if (stored === undefined) {
-          return Promise.reject(notFound("NoSuchKey"));
-        }
-        return Promise.resolve({
-          ContentType: stored.contentType,
-          Body: { transformToByteArray: () => Promise.resolve(stored.body.slice()) },
-        });
-      }
-      case "HeadObjectCommand": {
-        if (!objects.has(Key ?? "")) {
-          return Promise.reject(notFound("NotFound"));
-        }
-        return Promise.resolve({});
-      }
-      case "DeleteObjectCommand": {
-        objects.delete(Key ?? "");
-        return Promise.resolve({});
-      }
-      case "HeadBucketCommand":
-        return Promise.resolve({});
-      default:
-        return Promise.reject(
-          new Error(`unexpected command ${command.constructor.name}`),
-        );
-    }
-  };
-
-  // The provider only ever calls `send`; the fake satisfies the rest of the type by cast.
-  return { send } as unknown as S3Client;
-}
-
-conformance(
-  "S3BlobStore (fake client)",
-  () => new S3BlobStore({ bucket: "test", region: "us-east-1", client: fakeS3Client() }),
-);
-
-describe("S3BlobStore", () => {
-  it("wraps non-404 SDK errors with operation context", async () => {
-    const boom = { send: () => Promise.reject(new Error("boom")) } as unknown as S3Client;
-    const store = new S3BlobStore({ bucket: "test", region: "us-east-1", client: boom });
-    await expect(store.put("k", new Uint8Array([1]))).rejects.toThrow(/s3 put failed/);
-  });
-});
-
-/**
- * Live integration suite. Gated behind `UPLOADS_S3_TEST_ENDPOINT` (e.g. a MinIO/LocalStack
- * URL) so the default offline run stays green; `UPLOADS_S3_TEST_BUCKET` must already exist.
- */
-const liveEndpoint = process.env.UPLOADS_S3_TEST_ENDPOINT;
-const liveSuite = liveEndpoint === undefined ? describe.skip : describe;
-liveSuite("S3BlobStore (live)", () => {
-  const bucket = process.env.UPLOADS_S3_TEST_BUCKET ?? "uploads-test";
-  conformance(
-    "conformance",
-    () =>
-      new S3BlobStore({
-        bucket,
-        region: process.env.UPLOADS_S3_TEST_REGION ?? "us-east-1",
-        endpoint: liveEndpoint,
-        forcePathStyle: true,
-        credentials: {
-          accessKeyId: process.env.UPLOADS_S3_TEST_ACCESS_KEY ?? "minioadmin",
-          secretAccessKey: process.env.UPLOADS_S3_TEST_SECRET_KEY ?? "minioadmin",
-        },
-      }),
-  );
-});
-
-describe("provideUploads", () => {
-  let dir: string;
-
-  beforeAll(async () => {
-    dir = await mkdtemp(join(tmpdir(), "uploads-provide-"));
-  });
-
-  afterEach(async () => {
-    await rm(join(dir, "k"), { force: true });
-    await rm(join(dir, "k.meta.json"), { force: true });
-  });
-
-  afterAll(async () => {
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  it("defaults to the memory provider", () => {
-    expect(provideUploads(undefined, {})).toBeInstanceOf(MemoryBlobStore);
-  });
-
-  it("builds a filesystem store", async () => {
-    const store = provideUploads({ provider: "filesystem", filesystem: { dir } });
-    await store.put("k", new Uint8Array([7]));
-    expect((await store.get("k"))?.body).toEqual(new Uint8Array([7]));
-  });
-
-  it("rejects a filesystem provider without config", () => {
-    expect(() => provideUploads({ provider: "filesystem" })).toThrow();
-  });
-
-  it("builds an s3 store", () => {
-    const store = provideUploads({
-      provider: "s3",
-      s3: { bucket: "b", region: "us-east-1" },
+describe("provideUploads (instrumented Uploader over memory)", () => {
+  it("round-trips through the byte helpers", async () => {
+    const m = provideUploads({ bucketName: "test" });
+    await saveFile(m, "note.txt", new TextEncoder().encode("hi"), {
+      contentType: "text/plain",
     });
-    expect(store).toBeInstanceOf(S3BlobStore);
+    expect(new TextDecoder().decode(await readFile(m, "note.txt"))).toBe("hi");
   });
 
-  it("rejects an s3 provider without config", () => {
-    expect(() => provideUploads({ provider: "s3" })).toThrow();
+  it("rejects reading an absent object", async () => {
+    const m = provideUploads({ bucketName: "test" });
+    await expect(m.open("missing")).rejects.toBeInstanceOf(BlobNotFoundError);
+  });
+
+  it("exposes the optional capabilities", async () => {
+    const m = provideUploads({ bucketName: "test" });
+    expect(isRangeReader(m)).toBe(true);
+    expect(isURLSigner(m)).toBe(true);
+    expect(isAttributer(m)).toBe(true);
+    expect(isLister(m)).toBe(true);
+  });
+
+  it("lists via the Lister capability", async () => {
+    const m = provideUploads({ bucketName: "test" });
+    await saveFile(m, "a.txt", bytes(1));
+    await saveFile(m, "b.txt", bytes(2));
+    if (!isLister(m)) throw new Error("expected a Lister");
+    const paths = (await listAll(m, "")).map((o) => o.path);
+    expect(paths.sort()).toEqual(["a.txt", "b.txt"]);
+  });
+
+  it("honors bucketPrefix transparently", async () => {
+    const m = provideUploads({ bucketName: "test", bucketPrefix: "p/" });
+    await saveFile(m, "a.txt", bytes(1));
+    if (!isLister(m)) throw new Error("expected a Lister");
+    expect((await listAll(m, "")).map((o) => o.path)).toEqual(["a.txt"]);
+  });
+});
+
+describe("NoopUploadManager", () => {
+  it("discards writes and reads back nothing", async () => {
+    const m: UploadManager = new NoopUploadManager();
+    await m.save("a", bytes(1));
+    await m.save("s", bytesToStream(bytes(1, 2)));
+    expect(await read(await m.open("a"))).toEqual(bytes());
+    expect(await m.exists("a")).toBe(false);
+    await expect(m.delete("a")).resolves.toBeUndefined();
+  });
+
+  it("lists nothing and signs to an empty URL", async () => {
+    const m: Attributer & Lister & URLSigner = new NoopUploadManager();
+    expect(await listAll(m, "")).toEqual([]);
+    expect(await m.signedURL("a")).toBe("");
+    expect((await m.attributes("a")).size).toBe(0);
+  });
+});
+
+describe("UploadsConfigSchema", () => {
+  it("defaults to the memory provider", () => {
+    expect(UploadsConfigSchema.parse({ bucketName: "b" }).provider).toBe("memory");
+  });
+
+  it("requires bucketName", () => {
+    expect(() => UploadsConfigSchema.parse({})).toThrow();
+  });
+
+  it("requires the filesystem sub-config for the filesystem provider", () => {
+    expect(() =>
+      UploadsConfigSchema.parse({ bucketName: "b", provider: "filesystem" }),
+    ).toThrow();
+    expect(() =>
+      UploadsConfigSchema.parse({
+        bucketName: "b",
+        provider: "filesystem",
+        filesystem: { rootDirectory: "/tmp/x" },
+      }),
+    ).not.toThrow();
+  });
+
+  it("requires r2 credentials for the r2 provider", () => {
+    expect(() =>
+      UploadsConfigSchema.parse({ bucketName: "b", provider: "r2" }),
+    ).toThrow();
+  });
+});
+
+/**
+ * S3Bucket against a fake `send` that dispatches on command name over an in-memory map — exercises
+ * the S3/R2/Backblaze code path (range headers, list, not-found normalization) without a network.
+ */
+describe("S3Bucket (fake client)", () => {
+  class NotFound extends Error {
+    override name = "NoSuchKey";
+  }
+
+  function fakeClient(): S3Client {
+    const store = new Map<string, Uint8Array>();
+    const send = (command: {
+      constructor: { name: string };
+      input: Record<string, unknown>;
+    }) => {
+      const { name } = command.constructor;
+      const key = command.input.Key as string;
+      switch (name) {
+        case "PutObjectCommand":
+          store.set(key, command.input.Body as Uint8Array);
+          return Promise.resolve({});
+        case "GetObjectCommand": {
+          const value = store.get(key);
+          if (value === undefined) return Promise.reject(new NotFound());
+          const range = command.input.Range as string | undefined;
+          let slice = value;
+          if (range) {
+            const [start, end] = range.replace("bytes=", "").split("-");
+            slice = value.slice(Number(start), end === "" ? undefined : Number(end) + 1);
+          }
+          return Promise.resolve({
+            Body: { transformToWebStream: () => bytesToStream(slice) },
+          });
+        }
+        case "HeadObjectCommand": {
+          const value = store.get(key);
+          if (value === undefined) return Promise.reject(new NotFound());
+          return Promise.resolve({
+            ContentLength: value.length,
+            ContentType: "text/plain",
+          });
+        }
+        case "DeleteObjectCommand":
+          store.delete(key);
+          return Promise.resolve({});
+        case "ListObjectsV2Command": {
+          const prefix = (command.input.Prefix as string | undefined) ?? "";
+          const Contents = [...store.entries()]
+            .filter(([k]) => k.startsWith(prefix))
+            .map(([k, v]) => ({ Key: k, Size: v.length }));
+          return Promise.resolve({ Contents, IsTruncated: false });
+        }
+        default:
+          return Promise.reject(new Error(`unexpected command ${name}`));
+      }
+    };
+    return { send } as unknown as S3Client;
+  }
+
+  it("round-trips, ranges, heads, lists, and deletes", async () => {
+    const b = new S3Bucket(fakeClient(), "bucket");
+    await b.write("a.txt", bytes(0, 1, 2, 3, 4), { contentType: "text/plain" });
+
+    expect(await read(await b.openRange("a.txt", 0, -1))).toEqual(bytes(0, 1, 2, 3, 4));
+    expect(await read(await b.openRange("a.txt", 1, 2))).toEqual(bytes(1, 2));
+    expect(await read(await b.openRange("a.txt", 3, -1))).toEqual(bytes(3, 4));
+
+    expect(await b.exists("a.txt")).toBe(true);
+    expect(await b.exists("missing")).toBe(false);
+    expect((await b.attributes("a.txt")).size).toBe(5);
+    expect((await listAll(b, "")).map((o) => o.path)).toEqual(["a.txt"]);
+
+    await b.delete("a.txt");
+    expect(await b.exists("a.txt")).toBe(false);
+  });
+
+  it("normalizes a missing object to BlobNotFoundError", async () => {
+    const b = new S3Bucket(fakeClient(), "bucket");
+    await expect(b.openRange("gone", 0, -1)).rejects.toBeInstanceOf(BlobNotFoundError);
+    await expect(b.attributes("gone")).rejects.toBeInstanceOf(BlobNotFoundError);
   });
 });

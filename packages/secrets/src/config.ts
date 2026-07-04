@@ -7,32 +7,63 @@ export const StaticSecretsConfigSchema = z.object({
 
 export type StaticSecretsConfig = z.infer<typeof StaticSecretsConfigSchema>;
 
-/** Environment-provider config. An optional prefix is stripped/added to every lookup. */
+/** Environment-provider config. An optional prefix is prepended to every lookup. */
 export const EnvSecretsConfigSchema = z.object({
   prefix: z.string().default(""),
 });
 
 export type EnvSecretsConfig = z.infer<typeof EnvSecretsConfigSchema>;
 
+/** GCP Secret Manager config. Mirrors Go's `gcp.Config` — `projectID` is required. */
+export const GCPSecretsConfigSchema = z.object({
+  projectID: z.string().min(1),
+});
+
+export type GCPSecretsConfig = z.infer<typeof GCPSecretsConfigSchema>;
+
+/** AWS SSM Parameter Store config. Mirrors Go's `ssm.Config` — `region` is required. */
+export const SSMSecretsConfigSchema = z.object({
+  region: z.string().min(1),
+  prefix: z.string().default(""),
+});
+
+export type SSMSecretsConfig = z.infer<typeof SSMSecretsConfigSchema>;
+
+/** Kubernetes secret source config. Mirrors Go's `kubectl.Config` — `namespace` is required. */
+export const KubectlSecretsConfigSchema = z.object({
+  namespace: z.string().min(1),
+  kubeconfig: z.string().default(""),
+});
+
+export type KubectlSecretsConfig = z.infer<typeof KubectlSecretsConfigSchema>;
+
+/** Providers whose config block is mandatory — the analogue of Go's per-provider `When(Required)`. */
+const PROVIDERS_REQUIRING_CONFIG = ["static", "gcp", "ssm", "kubectl"] as const;
+
 /**
- * Secrets config. Replaces the Go `env:`-tagged struct + ozzo `ValidateWithContext`.
- * `env` (default) reads `process.env`; `static` serves an inline map; `noop` returns
- * nothing. Cloud sources (GCP Secret Manager, AWS SSM, Kubernetes) are documented as
- * future providers — they need provider SDKs or mounted files and stay server-side.
+ * Secrets config. Replaces the Go `env:`-tagged struct + ozzo `ValidateWithContext`. `env`
+ * (default) reads `process.env`; `static` serves an inline map; `noop` returns nothing; `gcp`,
+ * `ssm`, and `kubectl` back onto GCP Secret Manager, AWS SSM Parameter Store, and Kubernetes
+ * secrets respectively — all server-side, each requiring its own config block.
  */
 export const SecretsConfigSchema = z
   .object({
-    provider: z.enum(["env", "static", "noop"]).default("env"),
+    provider: z.enum(["env", "static", "noop", "gcp", "ssm", "kubectl"]).default("env"),
     env: EnvSecretsConfigSchema.optional(),
     static: StaticSecretsConfigSchema.optional(),
+    gcp: GCPSecretsConfigSchema.optional(),
+    ssm: SSMSecretsConfigSchema.optional(),
+    kubectl: KubectlSecretsConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
-    if (cfg.provider === "static" && cfg.static === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["static"],
-        message: "static config is required when provider is 'static'",
-      });
+    for (const provider of PROVIDERS_REQUIRING_CONFIG) {
+      if (cfg.provider === provider && cfg[provider] === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [provider],
+          message: `${provider} config is required when provider is '${provider}'`,
+        });
+      }
     }
   });
 

@@ -17,6 +17,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "changeset": "changeset",
+    "version": "changeset version",
+    "release": "turbo run build && changeset publish",
     "clean": "turbo run clean && rm -rf node_modules"
   },
   "devDependencies": {

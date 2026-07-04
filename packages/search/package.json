@@ -10,8 +10,7 @@
     "directory": "packages/search"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "exports": {
     ".": {

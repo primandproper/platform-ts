@@ -10,8 +10,7 @@
     "directory": "packages/eventstream"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "exports": {
     ".": {

@@ -10,8 +10,7 @@
     "directory": "packages/retry"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "exports": {
     ".": {

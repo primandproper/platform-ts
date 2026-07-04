@@ -10,8 +10,7 @@
     "directory": "packages/encoding"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "exports": {
     ".": {

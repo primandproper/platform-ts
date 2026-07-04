@@ -12,6 +12,8 @@ export interface SecretSource {
   getRequired(key: string): Promise<string>;
   /** Verifies the backing store is reachable. */
   ping(): Promise<void>;
+  /** Releases any resources the source holds (SDK clients, connections). Mirrors Go's `Close`. */
+  close(): Promise<void>;
 }
 
 /** Thrown by {@link SecretSource.getRequired} when a required secret is not set. */

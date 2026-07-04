@@ -1,38 +1,45 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
 
-# Don't run two publishes at once.
+# Don't run two version/publish passes at once.
 concurrency:
   group: release-${{ github.workflow }}
   cancel-in-progress: false
 
 permissions:
-  contents: read
-  id-token: write # required for npm provenance
+  contents: write # push the "version packages" PR branch + git tags
+  pull-requests: write # open/update the "version packages" PR
+  id-token: write # npm provenance (OIDC)
 
 jobs:
-  publish:
-    name: Publish to npm
+  release:
+    name: Version or publish
     runs-on: ubuntu-latest
-    environment: npm # optional gate; configure required reviewers in repo settings
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changesets needs full history
 
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22 # OIDC trusted publishing needs Node >= 22.14
           cache: pnpm
           registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm CLI >= 11.5.1; Node 22 still ships npm 10.
+      # `changeset publish` shells out to this npm, so upgrading it is enough.
+      - name: Upgrade npm for OIDC
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # Don't ship a broken release: gate the publish on the full check suite.
+      # Never version or publish off a broken tree.
       - name: Lint
         run: pnpm run lint
 
@@ -42,13 +49,23 @@ jobs:
       - name: Test
         run: pnpm run test
 
-      - name: Build
-        run: pnpm run build
-
-      # Publishes every workspace package whose version isn't already on the
-      # registry. access + provenance come from each package's publishConfig.
-      - name: Publish
-        run: pnpm publish --recursive --no-git-checks
+      # With pending changesets: opens/updates a "version packages" PR that
+      # bumps ONLY the changed packages. With none (i.e. that PR was merged):
+      # runs `pnpm run release` (build + `changeset publish`), which publishes
+      # ONLY the packages whose version isn't already on the registry, and tags them.
+      #
+      # Auth is npm Trusted Publishing (OIDC) via `id-token: write` above — no
+      # NPM_TOKEN secret. This REQUIRES a trusted publisher configured on npm for
+      # each package (Settings > Trusted publisher: this repo + `release.yml`),
+      # which can only be done after the package's first publish. Until then, the
+      # baseline goes out via scripts/first-publish.sh. Provenance is automatic
+      # under trusted publishing, so no --provenance flag is needed.
+      - name: Version or publish
+        uses: changesets/action@v1
+        with:
+          version: pnpm run version
+          publish: pnpm run release
+          commit: "chore: version packages"
+          title: "chore: version packages"
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -10,8 +10,7 @@
     "directory": "packages/featureflags"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "exports": {
     ".": {
