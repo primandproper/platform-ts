@@ -25,7 +25,10 @@ interface PostHogBrowserClient {
  * `$pageview` / `$screen`. Same factory signature as the Node provider, so call-site code is
  * portable across contexts.
  */
-export function providePostHog(config: PostHogConfig, deps: ObservabilityDeps = {}): EventReporter {
+export function providePostHog(
+  config: PostHogConfig,
+  deps: ObservabilityDeps = {},
+): EventReporter {
   const client = new PostHog() as unknown as PostHogBrowserClient;
   client.init(config.apiKey, { api_host: config.host ?? DEFAULT_HOST });
   return new VendorReporter(
@@ -33,8 +36,10 @@ export function providePostHog(config: PostHogConfig, deps: ObservabilityDeps = 
     {
       track: (event, properties) => void client.capture(event, properties),
       identify: (userId, traits) => void client.identify(userId, traits),
-      page: (name, properties) => void client.capture("$pageview", { $screen_name: name, ...properties }),
-      screen: (name, properties) => void client.capture("$screen", { $screen_name: name, ...properties }),
+      page: (name, properties) =>
+        void client.capture("$pageview", { $screen_name: name, ...properties }),
+      screen: (name, properties) =>
+        void client.capture("$screen", { $screen_name: name, ...properties }),
       flush: () => Promise.resolve(),
       shutdown: () => Promise.resolve(),
     },

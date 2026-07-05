@@ -21,16 +21,26 @@ function distinctId(context: EventContext | undefined): string {
  * `$pageview` / `$screen` events. `flush()` drains the buffer; `shutdown()` flushes and stops the
  * background sender. Mirrors the Go platform's PostHog provider (default endpoint included).
  */
-export function providePostHog(config: PostHogConfig, deps: ObservabilityDeps = {}): EventReporter {
+export function providePostHog(
+  config: PostHogConfig,
+  deps: ObservabilityDeps = {},
+): EventReporter {
   const client = new PostHog(config.apiKey, { host: config.host ?? DEFAULT_HOST });
   return new VendorReporter(
     "posthog",
     {
       track(event, properties, context) {
-        client.capture({ distinctId: distinctId(context), event, ...(properties ? { properties } : {}) });
+        client.capture({
+          distinctId: distinctId(context),
+          event,
+          ...(properties ? { properties } : {}),
+        });
       },
       identify(userId, traits) {
-        client.identify({ distinctId: userId, ...(traits ? { properties: traits } : {}) });
+        client.identify({
+          distinctId: userId,
+          ...(traits ? { properties: traits } : {}),
+        });
       },
       page(name, properties, context) {
         client.capture({

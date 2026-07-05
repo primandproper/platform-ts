@@ -35,7 +35,11 @@ beforeEach(() => {
 
 describe("provideSegment (node)", () => {
   it("maps track to the SDK with the identity taken from context", () => {
-    provideSegmentNode({ writeKey: "wk" }).track("signed_up", { plan: "pro" }, { userId: "u1" });
+    provideSegmentNode({ writeKey: "wk" }).track(
+      "signed_up",
+      { plan: "pro" },
+      { userId: "u1" },
+    );
     expect(nodeClient.track).toHaveBeenCalledWith({
       event: "signed_up",
       properties: { plan: "pro" },
@@ -45,7 +49,10 @@ describe("provideSegment (node)", () => {
 
   it("falls back to a synthetic anonymous id when the caller supplies none", () => {
     provideSegmentNode({ writeKey: "wk" }).track("viewed");
-    expect(nodeClient.track).toHaveBeenCalledWith({ event: "viewed", anonymousId: "anonymous" });
+    expect(nodeClient.track).toHaveBeenCalledWith({
+      event: "viewed",
+      anonymousId: "anonymous",
+    });
   });
 
   it("flush drains and shutdown closes, both delegating to the SDK", async () => {

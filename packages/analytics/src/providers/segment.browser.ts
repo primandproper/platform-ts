@@ -23,7 +23,10 @@ interface SegmentBrowserClient {
  * ids are left to `identify()` and `flush`/`shutdown` are no-ops. Same factory signature as the Node
  * provider, so call-site code is portable across contexts.
  */
-export function provideSegment(config: SegmentConfig, deps: ObservabilityDeps = {}): EventReporter {
+export function provideSegment(
+  config: SegmentConfig,
+  deps: ObservabilityDeps = {},
+): EventReporter {
   const analytics = AnalyticsBrowser.load({
     writeKey: config.writeKey,
   }) as unknown as SegmentBrowserClient;

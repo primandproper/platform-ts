@@ -37,7 +37,12 @@ export class MultiSourceReporter {
     this.#logger = observer.logger();
   }
 
-  track(source: string, event: string, properties?: EventProperties, context?: EventContext): void {
+  track(
+    source: string,
+    event: string,
+    properties?: EventProperties,
+    context?: EventContext,
+  ): void {
     this.#reporterFor(source).track(event, this.#withSource(source, properties), context);
   }
 
@@ -45,12 +50,26 @@ export class MultiSourceReporter {
     this.#reporterFor(source).identify(userId, this.#withSource(source, traits));
   }
 
-  page(source: string, name: string, properties?: EventProperties, context?: EventContext): void {
+  page(
+    source: string,
+    name: string,
+    properties?: EventProperties,
+    context?: EventContext,
+  ): void {
     this.#reporterFor(source).page?.(name, this.#withSource(source, properties), context);
   }
 
-  screen(source: string, name: string, properties?: EventProperties, context?: EventContext): void {
-    this.#reporterFor(source).screen?.(name, this.#withSource(source, properties), context);
+  screen(
+    source: string,
+    name: string,
+    properties?: EventProperties,
+    context?: EventContext,
+  ): void {
+    this.#reporterFor(source).screen?.(
+      name,
+      this.#withSource(source, properties),
+      context,
+    );
   }
 
   /** Flushes every registered source reporter. Best-effort; never throws. */

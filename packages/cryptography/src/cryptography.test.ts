@@ -119,9 +119,9 @@ describe("Salsa20Encryptor", () => {
   });
 
   it("rejects a key that is not 32 bytes", () => {
-    expect(() => new Salsa20Encryptor({ key: bytesToBase64(new Uint8Array(16)) })).toThrow(
-      /key length/,
-    );
+    expect(
+      () => new Salsa20Encryptor({ key: bytesToBase64(new Uint8Array(16)) }),
+    ).toThrow(/key length/);
   });
 });
 

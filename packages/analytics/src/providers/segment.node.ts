@@ -10,7 +10,9 @@ import { VendorReporter } from "./vendor.js";
 const FALLBACK_ANONYMOUS_ID = "anonymous";
 
 /** Resolves the Segment identity fields from call context (Segment requires one of the two). */
-function identity(context: EventContext | undefined): { userId: string } | { anonymousId: string } {
+function identity(
+  context: EventContext | undefined,
+): { userId: string } | { anonymousId: string } {
   if (context?.userId) {
     return { userId: context.userId };
   }
@@ -23,22 +25,37 @@ function identity(context: EventContext | undefined): { userId: string } | { ano
  * `flush()` drains the buffer without closing; `shutdown()` closes and flushes. Mirrors the Go
  * platform's Segment provider.
  */
-export function provideSegment(config: SegmentConfig, deps: ObservabilityDeps = {}): EventReporter {
+export function provideSegment(
+  config: SegmentConfig,
+  deps: ObservabilityDeps = {},
+): EventReporter {
   const analytics = new Analytics({ writeKey: config.writeKey });
   return new VendorReporter(
     "segment",
     {
       track(event, properties, context) {
-        analytics.track({ event, ...(properties ? { properties } : {}), ...identity(context) });
+        analytics.track({
+          event,
+          ...(properties ? { properties } : {}),
+          ...identity(context),
+        });
       },
       identify(userId, traits) {
         analytics.identify({ userId, ...(traits ? { traits } : {}) });
       },
       page(name, properties, context) {
-        analytics.page({ name, ...(properties ? { properties } : {}), ...identity(context) });
+        analytics.page({
+          name,
+          ...(properties ? { properties } : {}),
+          ...identity(context),
+        });
       },
       screen(name, properties, context) {
-        analytics.screen({ name, ...(properties ? { properties } : {}), ...identity(context) });
+        analytics.screen({
+          name,
+          ...(properties ? { properties } : {}),
+          ...identity(context),
+        });
       },
       flush: () => analytics.flush(),
       shutdown: () => analytics.closeAndFlush(),
