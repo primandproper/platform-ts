@@ -10,14 +10,16 @@ describe("AnalyticsConfigSchema", () => {
   it("requires segment config when the provider is segment", () => {
     expect(() => AnalyticsConfigSchema.parse({ provider: "segment" })).toThrow();
     expect(
-      AnalyticsConfigSchema.parse({ provider: "segment", segment: { writeKey: "wk" } }).provider,
+      AnalyticsConfigSchema.parse({ provider: "segment", segment: { writeKey: "wk" } })
+        .provider,
     ).toBe("segment");
   });
 
   it("requires posthog config when the provider is posthog", () => {
     expect(() => AnalyticsConfigSchema.parse({ provider: "posthog" })).toThrow();
     expect(
-      AnalyticsConfigSchema.parse({ provider: "posthog", posthog: { apiKey: "k" } }).provider,
+      AnalyticsConfigSchema.parse({ provider: "posthog", posthog: { apiKey: "k" } })
+        .provider,
     ).toBe("posthog");
   });
 });

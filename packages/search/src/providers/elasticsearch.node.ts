@@ -222,7 +222,10 @@ export class ElasticsearchDocumentIndex<T> implements DocumentIndex<T> {
 function buildClientOptions(options: ElasticsearchDocumentIndexOptions): ClientOptions {
   const clientOptions: ClientOptions = { node: options.address, maxRetries: 10 };
   if (options.username || options.password) {
-    clientOptions.auth = { username: options.username ?? "", password: options.password ?? "" };
+    clientOptions.auth = {
+      username: options.username ?? "",
+      password: options.password ?? "",
+    };
   }
   if (options.caCert !== undefined) {
     clientOptions.tls = { ca: options.caCert };

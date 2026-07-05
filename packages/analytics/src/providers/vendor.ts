@@ -17,10 +17,22 @@ const o11yName = "analytics";
  * `*.browser.ts` factories.
  */
 export interface VendorSink {
-  track(event: string, properties: EventProperties | undefined, context: EventContext | undefined): void;
+  track(
+    event: string,
+    properties: EventProperties | undefined,
+    context: EventContext | undefined,
+  ): void;
   identify(userId: string, traits: EventProperties | undefined): void;
-  page(name: string, properties: EventProperties | undefined, context: EventContext | undefined): void;
-  screen(name: string, properties: EventProperties | undefined, context: EventContext | undefined): void;
+  page(
+    name: string,
+    properties: EventProperties | undefined,
+    context: EventContext | undefined,
+  ): void;
+  screen(
+    name: string,
+    properties: EventProperties | undefined,
+    context: EventContext | undefined,
+  ): void;
   /** Flushes buffered events without releasing the client. */
   flush(): Promise<void> | void;
   /** Flushes and releases the client. The sink is unusable afterwards. */

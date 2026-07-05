@@ -95,7 +95,9 @@ export async function provideDocumentIndex<T>(
       );
     case "elasticsearch":
       if (cfg.elasticsearch === undefined) {
-        throw new Error("elasticsearch config is required when provider is 'elasticsearch'");
+        throw new Error(
+          "elasticsearch config is required when provider is 'elasticsearch'",
+        );
       }
       return ElasticsearchDocumentIndex.create<T>(
         {

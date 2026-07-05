@@ -73,9 +73,9 @@ describe("provideDocumentIndex", () => {
   });
 
   it("rejects when algolia is selected without its config", async () => {
-    await expect(provideDocumentIndex("test-index", { provider: "algolia" })).rejects.toThrow(
-      /algolia/,
-    );
+    await expect(
+      provideDocumentIndex("test-index", { provider: "algolia" }),
+    ).rejects.toThrow(/algolia/);
   });
 
   it("rejects when elasticsearch is selected without its config", async () => {
@@ -155,7 +155,11 @@ describe.skipIf(!ALGOLIA_APP_ID || !ALGOLIA_API_KEY)("algolia (live)", () => {
   it("round-trips a document and maps id<->objectID", async () => {
     const cb = fakeBreaker(true);
     const index = new AlgoliaDocumentIndex<Doc>(
-      { appID: ALGOLIA_APP_ID!, apiKey: ALGOLIA_API_KEY!, indexName: `test-${randomUUID()}` },
+      {
+        appID: ALGOLIA_APP_ID!,
+        apiKey: ALGOLIA_API_KEY!,
+        indexName: `test-${randomUUID()}`,
+      },
       cb,
     );
     try {

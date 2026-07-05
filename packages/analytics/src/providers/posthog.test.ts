@@ -32,7 +32,11 @@ beforeEach(() => {
 
 describe("providePostHog (node)", () => {
   it("captures with a distinct id derived from context", () => {
-    providePostHogNode({ apiKey: "k" }).track("signed_up", { plan: "pro" }, { userId: "u1" });
+    providePostHogNode({ apiKey: "k" }).track(
+      "signed_up",
+      { plan: "pro" },
+      { userId: "u1" },
+    );
     expect(nodeClient.capture).toHaveBeenCalledWith({
       distinctId: "u1",
       event: "signed_up",
@@ -42,7 +46,10 @@ describe("providePostHog (node)", () => {
 
   it("falls back to a synthetic distinct id when none is supplied", () => {
     providePostHogNode({ apiKey: "k" }).track("viewed");
-    expect(nodeClient.capture).toHaveBeenCalledWith({ distinctId: "anonymous", event: "viewed" });
+    expect(nodeClient.capture).toHaveBeenCalledWith({
+      distinctId: "anonymous",
+      event: "viewed",
+    });
   });
 
   it("maps page to a $pageview event", () => {
@@ -64,15 +71,22 @@ describe("providePostHog (node)", () => {
 
   it("passes the default host when none is configured", () => {
     providePostHogNode({ apiKey: "k" });
-    expect(PostHogNodeMock).toHaveBeenCalledWith("k", { host: "https://app.posthog.com" });
+    expect(PostHogNodeMock).toHaveBeenCalledWith("k", {
+      host: "https://app.posthog.com",
+    });
   });
 });
 
 describe("providePostHog (browser)", () => {
   it("initializes the SDK and captures positionally", () => {
-    const reporter = providePostHogBrowser({ apiKey: "k", host: "https://eu.posthog.com" });
+    const reporter = providePostHogBrowser({
+      apiKey: "k",
+      host: "https://eu.posthog.com",
+    });
     reporter.track("clicked", { id: 1 });
-    expect(browserClient.init).toHaveBeenCalledWith("k", { api_host: "https://eu.posthog.com" });
+    expect(browserClient.init).toHaveBeenCalledWith("k", {
+      api_host: "https://eu.posthog.com",
+    });
     expect(browserClient.capture).toHaveBeenCalledWith("clicked", { id: 1 });
   });
 

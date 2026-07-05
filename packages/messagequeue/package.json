@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/messagequeue",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
   "description": "Server-only message queue: Publisher/Consumer interfaces with swappable providers.",
   "license": "AGPL-3.0-or-later",
