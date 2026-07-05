@@ -30,6 +30,12 @@ export interface Operation {
   error(err: unknown, description: string): unknown;
   /** Like {@link error} but returns nothing — for a handled error you do not re-throw. */
   acknowledge(err: unknown, description: string): void;
+  /**
+   * Whether an error has already been recorded on this operation via {@link error} or
+   * {@link acknowledge}. {@link Observer.run} checks this so it doesn't double-record (or
+   * double-log) an error the callback already handled.
+   */
+  recorded(): boolean;
   /** Ends the span. Pair it with {@link Observer.begin} in a `try`/`finally`. */
   end(): void;
 }
@@ -66,6 +72,7 @@ function toAttributeValue(value: unknown): AttributeValue {
 class SpanOperation implements Operation {
   #logger: Logger;
   readonly #span: Span;
+  #recorded = false;
 
   constructor(logger: Logger, span: Span) {
     this.#span = span;
@@ -113,11 +120,16 @@ class SpanOperation implements Operation {
     this.#recordError(err, description);
   }
 
+  recorded(): boolean {
+    return this.#recorded;
+  }
+
   end(): void {
     this.#span.end();
   }
 
   #recordError(err: unknown, description: string): void {
+    this.#recorded = true;
     this.#span.recordException(err as Error);
     this.#span.setStatus({
       code: SpanStatusCode.ERROR,

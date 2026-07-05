@@ -26,6 +26,18 @@ export interface RecordedError {
 }
 
 /**
+ * A settled {@link Observer.run}, captured so tests can assert the duration/outcome metrics the
+ * real {@link makeObserver} auto-records. `durationMs` is always `>= 0` but not otherwise
+ * meaningful under the recording double.
+ */
+export interface RecordedRun {
+  seq: number;
+  operation: string;
+  outcome: "ok" | "error";
+  durationMs: number;
+}
+
+/**
  * An {@link Operation} that captures observations instead of emitting them. Created by
  * {@link RecordingObserver}; you rarely construct one directly.
  */
@@ -35,6 +47,7 @@ class RecordingOperation implements Operation {
   readonly #errors: RecordedError[];
   readonly #nextSeq: () => number;
   readonly #span: Span;
+  #recorded = false;
 
   constructor(
     name: string,
@@ -90,12 +103,18 @@ class RecordingOperation implements Operation {
   }
 
   error(err: unknown, description: string): unknown {
+    this.#recorded = true;
     this.#errors.push({ seq: this.#nextSeq(), operation: this.name, err, description });
     return err;
   }
 
   acknowledge(err: unknown, description: string): void {
+    this.#recorded = true;
     this.#errors.push({ seq: this.#nextSeq(), operation: this.name, err, description });
+  }
+
+  recorded(): boolean {
+    return this.#recorded;
   }
 
   end(): void {}
@@ -113,6 +132,7 @@ class RecordingOperation implements Operation {
 export class RecordingObserver implements Observer {
   readonly #observations: Observation[] = [];
   readonly #errors: RecordedError[] = [];
+  readonly #runs: RecordedRun[] = [];
   #seq = 0;
 
   readonly #nextSeq = (): number => this.#seq++;
@@ -131,9 +151,20 @@ export class RecordingObserver implements Observer {
 
   async run<T>(name: string, fn: (op: Operation) => T | Promise<T>): Promise<T> {
     const op = this.begin(name);
+    const start = performance.now();
+    let outcome: RecordedRun["outcome"] = "ok";
     try {
       return await fn(op);
+    } catch (err) {
+      outcome = "error";
+      throw err;
     } finally {
+      this.#runs.push({
+        seq: this.#nextSeq(),
+        operation: name,
+        outcome,
+        durationMs: performance.now() - start,
+      });
       op.end();
     }
   }
@@ -146,6 +177,15 @@ export class RecordingObserver implements Observer {
   /** Errors routed through `op.error`/`op.acknowledge`, in order. */
   get errors(): readonly RecordedError[] {
     return this.#errors;
+  }
+
+  /**
+   * Every settled {@link run}, in order — the recording analogue of the duration/outcome
+   * metrics {@link makeObserver} auto-records. Assert `outcome` to prove a unit's `run` failed
+   * (and thus emits an error-count metric) without a real meter.
+   */
+  get runs(): readonly RecordedRun[] {
+    return this.#runs;
   }
 
   /** Observed keys, in order. */
@@ -191,10 +231,11 @@ export class RecordingObserver implements Observer {
     return i === keys.length;
   }
 
-  /** Clears all captured observations and errors. */
+  /** Clears all captured observations, errors, and runs. */
   reset(): void {
     this.#observations.length = 0;
     this.#errors.length = 0;
+    this.#runs.length = 0;
     this.#seq = 0;
   }
 }

@@ -25,20 +25,20 @@ export class ConsoleLogger implements Logger {
     this.#bindings = bindings;
   }
 
-  debug(message: string): void {
-    this.#emit("debug", message);
+  debug(message: string, values?: LogValues): void {
+    this.#emit("debug", message, undefined, values);
   }
 
-  info(message: string): void {
-    this.#emit("info", message);
+  info(message: string, values?: LogValues): void {
+    this.#emit("info", message, undefined, values);
   }
 
-  warn(message: string): void {
-    this.#emit("warn", message);
+  warn(message: string, values?: LogValues): void {
+    this.#emit("warn", message, undefined, values);
   }
 
-  error(whatWasHappening: string, err?: unknown): void {
-    this.#emit("error", whatWasHappening, err);
+  error(whatWasHappening: string, err?: unknown, values?: LogValues): void {
+    this.#emit("error", whatWasHappening, err, values);
   }
 
   with(values: LogValues): Logger {
@@ -58,13 +58,14 @@ export class ConsoleLogger implements Logger {
     return { level: this.#level, name: this.#name };
   }
 
-  #emit(level: LogLevel, message: string, err?: unknown): void {
+  #emit(level: LogLevel, message: string, err?: unknown, values?: LogValues): void {
     if (LEVEL_ORDER[level] < LEVEL_ORDER[this.#level]) {
       return;
     }
     const fields = {
       name: this.#name,
       ...this.#bindings,
+      ...values,
       ...(err === undefined ? {} : { err }),
     };
     console[level](`[${this.#name}] ${message}`, fields);

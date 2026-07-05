@@ -1,15 +1,28 @@
 import { describe, expect, it } from "vitest";
 
 import { makeMetrics, provideMeterProvider } from "./metrics.js";
-import { noopMeterProvider, type MeterProvider } from "./observability.js";
+import {
+  defaultMeterProvider,
+  noopMeterProvider,
+  type MeterProvider,
+} from "./observability.js";
 
 describe("provideMeterProvider", () => {
-  it("falls back to the noop meter provider with no deps", () => {
-    expect(provideMeterProvider()).toBe(noopMeterProvider);
+  it("defaults to the global-backed meter provider with no deps", () => {
+    expect(provideMeterProvider()).toBe(defaultMeterProvider);
   });
 
-  it("falls back to the noop meter provider for the otel provider without injection", () => {
-    expect(provideMeterProvider({ provider: "otel" })).toBe(noopMeterProvider);
+  it("uses the global-backed provider for otel without injection", () => {
+    expect(provideMeterProvider({ provider: "otel" })).toBe(defaultMeterProvider);
+  });
+
+  it("forces the genuinely-inert provider for noop, even with an injected meter", () => {
+    const injected: MeterProvider = {
+      getMeter: (name) => defaultMeterProvider.getMeter(name),
+    };
+    expect(provideMeterProvider({ provider: "noop" }, { metrics: injected })).toBe(
+      noopMeterProvider,
+    );
   });
 
   it("returns an injected meter provider", () => {

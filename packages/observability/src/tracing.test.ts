@@ -1,16 +1,29 @@
 import { type Span, SpanStatusCode, type Tracer } from "@opentelemetry/api";
 import { describe, expect, it, vi } from "vitest";
 
-import { noopTracerProvider, type TracerProvider } from "./observability.js";
+import {
+  defaultTracerProvider,
+  noopTracerProvider,
+  type TracerProvider,
+} from "./observability.js";
 import { provideTracerProvider, withSpan } from "./tracing.js";
 
 describe("provideTracerProvider", () => {
-  it("falls back to the noop tracer provider with no deps", () => {
-    expect(provideTracerProvider()).toBe(noopTracerProvider);
+  it("defaults to the global-backed tracer provider with no deps", () => {
+    expect(provideTracerProvider()).toBe(defaultTracerProvider);
   });
 
-  it("falls back to the noop tracer provider for the otel provider without injection", () => {
-    expect(provideTracerProvider({ provider: "otel" })).toBe(noopTracerProvider);
+  it("uses the global-backed provider for otel without injection", () => {
+    expect(provideTracerProvider({ provider: "otel" })).toBe(defaultTracerProvider);
+  });
+
+  it("forces the genuinely-inert provider for noop, even with an injected tracer", () => {
+    const injected: TracerProvider = {
+      getTracer: (name) => defaultTracerProvider.getTracer(name),
+    };
+    expect(provideTracerProvider({ provider: "noop" }, { tracer: injected })).toBe(
+      noopTracerProvider,
+    );
   });
 
   it("returns an injected tracer provider", () => {

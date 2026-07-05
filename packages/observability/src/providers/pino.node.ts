@@ -12,20 +12,32 @@ export class PinoLogger implements Logger {
     this.#base = base;
   }
 
-  debug(message: string): void {
-    this.#base.debug(message);
+  debug(message: string, values?: LogValues): void {
+    if (values === undefined) {
+      this.#base.debug(message);
+    } else {
+      this.#base.debug(values, message);
+    }
   }
 
-  info(message: string): void {
-    this.#base.info(message);
+  info(message: string, values?: LogValues): void {
+    if (values === undefined) {
+      this.#base.info(message);
+    } else {
+      this.#base.info(values, message);
+    }
   }
 
-  warn(message: string): void {
-    this.#base.warn(message);
+  warn(message: string, values?: LogValues): void {
+    if (values === undefined) {
+      this.#base.warn(message);
+    } else {
+      this.#base.warn(values, message);
+    }
   }
 
-  error(whatWasHappening: string, err?: unknown): void {
-    this.#base.error({ err }, whatWasHappening);
+  error(whatWasHappening: string, err?: unknown, values?: LogValues): void {
+    this.#base.error({ ...values, err }, whatWasHappening);
   }
 
   with(values: LogValues): Logger {

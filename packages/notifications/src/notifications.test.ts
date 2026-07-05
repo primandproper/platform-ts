@@ -31,6 +31,11 @@ function countingMeter(): { deps: ObservabilityDeps; counts: Map<string, number>
     createCounter: (name: string) => ({
       add: (value: number) => counts.set(name, (counts.get(name) ?? 0) + value),
     }),
+    // makeObserver auto-mints an operation-duration histogram (OBS-1); the fake meter must
+    // provide it even though these tests only assert on the counters.
+    createHistogram: () => ({ record: () => undefined }),
+    createUpDownCounter: () => ({ add: () => undefined }),
+    createGauge: () => ({ record: () => undefined }),
   };
   const provider = { getMeter: () => meter } as unknown as MeterProvider;
   return { deps: { metrics: provider }, counts };

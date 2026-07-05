@@ -8,15 +8,17 @@ import { messageOf } from "@primandproper/errors";
 
 import { TracingConfigSchema, type TracingConfigInput } from "./config.js";
 import {
+  defaultTracerProvider,
   noopTracerProvider,
   type ObservabilityDeps,
   type TracerProvider,
 } from "./observability.js";
 
 /**
- * Provider factory mirroring the other packages' `provide*`. Both `noop` and `otel` resolve
- * to the global OTel tracer provider — a no-op until an SDK is registered — unless an
- * explicit provider is injected via `deps.tracer`.
+ * Provider factory mirroring the other packages' `provide*`. `provider: "otel"` (the default)
+ * resolves to the injected provider, or the globally-registered OTel tracer provider (a no-op
+ * until an SDK is registered). `provider: "noop"` forces a genuinely inert tracer, ignoring any
+ * injected or global provider.
  *
  * To wire a real backend on Node, register an SDK provider once at startup and either set it
  * global or inject it here:
@@ -26,7 +28,7 @@ import {
  * import { trace } from "@opentelemetry/api";
  *
  * const sdk = new NodeTracerProvider({ ... });
- * sdk.register();                                  // picked up by the noop fallback, or
+ * sdk.register();                                  // picked up by the otel default, or
  * provideTracerProvider({ provider: "otel" }, { tracer: sdk }); // inject explicitly
  * ```
  *
@@ -37,8 +39,11 @@ export function provideTracerProvider(
   config?: TracingConfigInput,
   deps?: ObservabilityDeps,
 ): TracerProvider {
-  TracingConfigSchema.parse(config ?? {});
-  return deps?.tracer ?? noopTracerProvider;
+  const cfg = TracingConfigSchema.parse(config ?? {});
+  if (cfg.provider === "noop") {
+    return noopTracerProvider;
+  }
+  return deps?.tracer ?? defaultTracerProvider;
 }
 
 /**

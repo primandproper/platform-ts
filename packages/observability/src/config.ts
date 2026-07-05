@@ -13,29 +13,25 @@ export type LoggingConfig = z.infer<typeof LoggingConfigSchema>;
 export type LoggingConfigInput = z.input<typeof LoggingConfigSchema>;
 
 /**
- * Metrics config. The `noop` default is safe with no OTel SDK registered — it falls back to
- * the global meter, which is a no-op until an `@opentelemetry/sdk-metrics` MeterProvider is
- * installed via `metrics.setGlobalMeterProvider(...)`. Selecting `otel` is identical at the
- * config level; it documents intent and lets a caller inject a provider explicitly.
+ * Metrics config. `otel` (the default) resolves to the injected or globally-registered
+ * `@opentelemetry/sdk-metrics` MeterProvider, so metrics flow automatically once an SDK is
+ * installed via `metrics.setGlobalMeterProvider(...)`. `noop` forces a genuinely inert meter
+ * regardless of any registered global — use it to hard-disable metrics.
  */
 export const MetricsConfigSchema = z.object({
-  provider: z.enum(["noop", "otel"]).default("noop"),
-  /** Instrumentation/meter name reported to the backend. */
-  name: z.string().min(1).default("app"),
+  provider: z.enum(["noop", "otel"]).default("otel"),
 });
 
 export type MetricsConfig = z.infer<typeof MetricsConfigSchema>;
 export type MetricsConfigInput = z.input<typeof MetricsConfigSchema>;
 
 /**
- * Tracing config. Same story as metrics: `noop` falls back to the global tracer (a no-op
- * until a `@opentelemetry/sdk-trace-*` TracerProvider is registered via
- * `trace.setGlobalTracerProvider(...)` or an injected provider).
+ * Tracing config. Same story as metrics: `otel` (the default) resolves to the injected or
+ * globally-registered `@opentelemetry/sdk-trace-*` TracerProvider; `noop` forces a genuinely
+ * inert tracer regardless of any registered global.
  */
 export const TracingConfigSchema = z.object({
-  provider: z.enum(["noop", "otel"]).default("noop"),
-  /** Instrumentation/tracer name reported to the backend. */
-  name: z.string().min(1).default("app"),
+  provider: z.enum(["noop", "otel"]).default("otel"),
 });
 
 export type TracingConfig = z.infer<typeof TracingConfigSchema>;
@@ -44,11 +40,18 @@ export type TracingConfigInput = z.input<typeof TracingConfigSchema>;
 /**
  * Profiling config. Continuous profiling is a server-only concern in practice, so the
  * default is `noop` and the browser always resolves to a noop profiler regardless of this
- * value. `pyroscope` documents intent and selects the Node pyroscope provider, which the
- * caller wires up themselves (see `providers/profiling.node.ts`).
+ * value.
+ *
+ * `pyroscope` is **experimental and currently unimplemented** — selecting it warns loudly and
+ * runs as a no-op until a caller wires up a real profiler (see `providers/profiling.node.ts`).
  */
 export const ProfilingConfigSchema = z.object({
-  provider: z.enum(["noop", "pyroscope"]).default("noop"),
+  provider: z
+    .enum(["noop", "pyroscope"])
+    .default("noop")
+    .describe(
+      "noop | pyroscope (experimental, unimplemented — runs as a warning-only noop)",
+    ),
   /** Application name reported to the profiling backend. */
   name: z.string().min(1).default("app"),
   /** Profiling backend server URL, when a provider needs one (e.g. pyroscope). */

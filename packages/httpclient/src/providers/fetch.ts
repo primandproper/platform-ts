@@ -91,9 +91,9 @@ export class FetchHttpClient implements HttpClient {
         raw =
           this.#retry === undefined ? await attempt() : await this.#retry.run(attempt);
       } catch (err) {
-        // run() records the exception and sets the span status; log it here too.
-        op.logger().error(`request to ${url} failed`, err);
-        throw err;
+        // op.error records the exception, sets the span status, and logs once; run() sees the
+        // recorded flag and won't double up.
+        throw op.error(err, `request to ${url} failed`);
       }
 
       op.set("http.response.status_code", raw.status);

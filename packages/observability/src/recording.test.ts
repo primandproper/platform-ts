@@ -99,6 +99,24 @@ describe("RecordingObserver", () => {
         }),
       ).rejects.toBe(boom);
     });
+
+    // OBS-1: run captures the outcome the real observer turns into duration/count metrics.
+    it("captures a settled run with its outcome", async () => {
+      const obs = makeRecordingObserver();
+
+      await obs.run("ok", () => 1);
+      await expect(
+        obs.run("bad", () => {
+          throw new Error("boom");
+        }),
+      ).rejects.toThrow("boom");
+
+      expect(obs.runs.map((r) => [r.operation, r.outcome])).toEqual([
+        ["ok", "ok"],
+        ["bad", "error"],
+      ]);
+      expect(obs.runs.every((r) => r.durationMs >= 0)).toBe(true);
+    });
   });
 
   it("reset clears observations, errors, and the seq counter", () => {
