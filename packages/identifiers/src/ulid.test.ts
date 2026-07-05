@@ -80,5 +80,14 @@ describe("ulidGenerator", () => {
     it("accepts a known-good ULID", () => {
       expect(ulidGenerator().isValid("01ARZ3NDEKTSV4RRFFQ69G5FAV")).toBe(true);
     });
+
+    it("rejects a timestamp-overflow ULID (first char above 7)", () => {
+      const gen = ulidGenerator();
+      // A leading char of 8..Z overflows the 48-bit timestamp and is not a valid ULID.
+      expect(gen.isValid("81ARZ3NDEKTSV4RRFFQ69G5FAV")).toBe(false);
+      expect(gen.isValid("Z1ARZ3NDEKTSV4RRFFQ69G5FAV")).toBe(false);
+      // The largest valid leading char (7) is still accepted.
+      expect(gen.isValid("71ARZ3NDEKTSV4RRFFQ69G5FAV")).toBe(true);
+    });
   });
 });

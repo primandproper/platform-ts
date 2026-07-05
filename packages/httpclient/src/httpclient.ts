@@ -27,6 +27,14 @@ export interface RequestOptions {
    * Defaults to `false` — the response is returned with `ok === false`.
    */
   throwOnError?: boolean;
+  /**
+   * Whether this request may be retried by the client's retry policy. Defaults to `true` for
+   * idempotent methods (GET/PUT/DELETE) and `false` for POST/PATCH, since retrying a
+   * non-idempotent request after a transport error risks a duplicate side effect (the server
+   * may have processed the first attempt before the response was lost). Set explicitly to
+   * override — e.g. `idempotent: true` on a POST that is safe to replay.
+   */
+  idempotent?: boolean;
 }
 
 /** A fully-specified request passed to {@link HttpClient.request}. */

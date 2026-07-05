@@ -1,6 +1,6 @@
 import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 
 import { DEFAULT_CONTENT_TYPE, decode, type ContentType } from "@primandproper/encoding";
@@ -17,6 +17,7 @@ import {
   NegativeOffsetError,
   NonPositiveChunkSizeError,
   OffsetBeyondEofError,
+  PathEscapesBaseError,
 } from "./errors.js";
 import { splitLines } from "./lines.js";
 
@@ -147,13 +148,18 @@ export class Dir {
   }
 
   /** Opens `path` as a directory handle, verifying it exists and is a directory. */
-  static async open(path: string, deps?: ObservabilityDeps): Promise<Dir> {
+  static open(path: string, deps?: ObservabilityDeps): Promise<Dir> {
+    return Dir.#openWith(path, new Files(deps));
+  }
+
+  /** Validates the path is a directory and roots a handle at it over the given reader. */
+  static async #openWith(path: string, files: Files): Promise<Dir> {
     const base = resolve(path);
     const info = await stat(base);
     if (!info.isDirectory()) {
       throw new Error(`${base} is not a directory`);
     }
-    return new Dir(base, new Files(deps));
+    return new Dir(base, files);
   }
 
   /** The absolute base directory. */
@@ -161,14 +167,21 @@ export class Dir {
     return this.#base;
   }
 
-  /** Resolves `name` against the base directory. */
+  /**
+   * Resolves `name` against the base directory, rejecting any name that escapes the base
+   * (via `..` segments or an absolute path) with {@link PathEscapesBaseError}.
+   */
   resolve(name: string): string {
-    return join(this.#base, name);
+    const resolved = resolve(join(this.#base, name));
+    if (resolved !== this.#base && !resolved.startsWith(this.#base + sep)) {
+      throw new PathEscapesBaseError(name);
+    }
+    return resolved;
   }
 
   /** Opens a subdirectory as a new handle, sharing this one's observability. */
   sub(rel: string): Promise<Dir> {
-    return Dir.open(this.resolve(rel));
+    return Dir.#openWith(this.resolve(rel), this.#files);
   }
 
   lines(name: string): AsyncGenerator<string> {

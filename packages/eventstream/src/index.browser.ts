@@ -53,6 +53,6 @@ export function provideEventStream(
         deps,
       );
     case "noop":
-      return new NoopEventStream();
+      return new NoopEventStream(deps);
   }
 }

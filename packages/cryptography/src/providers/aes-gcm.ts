@@ -5,7 +5,7 @@ import {
   type Observer,
 } from "@primandproper/observability";
 
-import { base64ToBytes } from "../base64.js";
+import { decodeBase64Key } from "../base64.js";
 import { bufferSource } from "../bytes.js";
 import type { Encryptor } from "../encryption.js";
 
@@ -48,13 +48,23 @@ export interface AesGcmEncryptorOptions {
  * `globalThis.crypto.subtle`, available on both Node 20+ and browsers.
  */
 export class AesGcmEncryptor implements Encryptor {
+  /** AES-GCM is an AEAD: the GCM tag authenticates the ciphertext, so tampering is rejected. */
+  readonly authenticated = true;
+
   readonly #rawKey: Uint8Array;
   readonly #observer: Observer;
   readonly #logger: Logger;
   #key: Promise<CryptoKey> | undefined;
 
   constructor(options: AesGcmEncryptorOptions, deps: ObservabilityDeps = {}) {
-    this.#rawKey = base64ToBytes(options.key);
+    // Validate decodability and length eagerly so a bad key fails at construction, not on the
+    // first encrypt/decrypt.
+    this.#rawKey = decodeBase64Key(options.key);
+    if (!VALID_KEY_BYTES.has(this.#rawKey.byteLength)) {
+      throw new Error(
+        `invalid AES key length: ${String(this.#rawKey.byteLength)} bytes (expected 16, 24, or 32)`,
+      );
+    }
     this.#observer = deps.observer ?? makeObserver(o11yName, deps);
     this.#logger = this.#observer.logger();
   }

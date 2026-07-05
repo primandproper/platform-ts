@@ -15,6 +15,7 @@ import { RFC6238TOTP } from "./providers/totp.js";
 import type { TokenGenerator } from "./tokens.js";
 import type { TOTP } from "./totp.js";
 
+export * from "./errors.js";
 export * from "./password.js";
 export * from "./totp.js";
 export * from "./tokens.js";

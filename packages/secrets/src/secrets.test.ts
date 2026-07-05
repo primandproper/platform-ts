@@ -7,7 +7,13 @@ import { NoopSecretSource } from "./providers/noop.js";
 import { SSMSecretSource, type SSMParameterAccessor } from "./providers/ssm.node.js";
 import { StaticSecretSource } from "./providers/static.js";
 
-import { provideSecrets, MissingSecretError, type SecretSource } from "./index.js";
+import {
+  CachingSecretSource,
+  getRequired,
+  provideSecrets,
+  MissingSecretError,
+  type SecretSource,
+} from "./index.js";
 
 /** A GCP seam fake keyed by the bare secret id extracted from a resolved resource name. */
 function gcpFake(values: Record<string, string>): GCPSecretAccessor {
@@ -152,6 +158,17 @@ describe("GCPSecretSource", () => {
     await source.close();
     expect(closed).toBe(true);
   });
+
+  it("ping rejects when the backend is unreachable/unauthorized", async () => {
+    const source = new GCPSecretSource({
+      projectID: "p",
+      client: {
+        access: () => Promise.reject(new Error("permission denied")),
+        close: () => Promise.resolve(),
+      },
+    });
+    await expect(source.ping()).rejects.toThrow("permission denied");
+  });
 });
 
 describe("SSMSecretSource", () => {
@@ -174,6 +191,13 @@ describe("SSMSecretSource", () => {
       client: { get: () => Promise.reject(new Error("throttled")) },
     });
     await expect(source.get("x")).rejects.toThrow("throttled");
+  });
+
+  it("ping rejects when the backend is unreachable/unauthorized", async () => {
+    const source = new SSMSecretSource({
+      client: { get: () => Promise.reject(new Error("throttled")) },
+    });
+    await expect(source.ping()).rejects.toThrow("throttled");
   });
 });
 
@@ -210,6 +234,14 @@ describe("KubectlSecretSource", () => {
     await expect(make().ping()).resolves.toBeUndefined();
     await expect(make().close()).resolves.toBeUndefined();
   });
+
+  it("ping rejects when the api server is unreachable/unauthorized", async () => {
+    const source = new KubectlSecretSource({
+      namespace: "default",
+      client: { read: () => Promise.reject(new Error("connection refused")) },
+    });
+    await expect(source.ping()).rejects.toThrow("connection refused");
+  });
 });
 
 describe("provideSecrets", () => {
@@ -222,14 +254,23 @@ describe("provideSecrets", () => {
     expect(await source.get("a")).toBe("1");
   });
 
-  it("builds a gcp source from config", () => {
+  it("wraps a gcp source in a caching decorator by default", () => {
     const source = provideSecrets({ provider: "gcp", gcp: { projectID: "p" } });
+    expect(source).toBeInstanceOf(CachingSecretSource);
+  });
+
+  it("builds a bare gcp source when caching is disabled", () => {
+    const source = provideSecrets({
+      provider: "gcp",
+      gcp: { projectID: "p" },
+      cache: { enabled: false },
+    });
     expect(source).toBeInstanceOf(GCPSecretSource);
   });
 
-  it("builds an ssm source from config", () => {
+  it("wraps an ssm source in a caching decorator by default", () => {
     const source = provideSecrets({ provider: "ssm", ssm: { region: "us-east-1" } });
-    expect(source).toBeInstanceOf(SSMSecretSource);
+    expect(source).toBeInstanceOf(CachingSecretSource);
   });
 
   it("rejects a static provider without config", () => {
@@ -247,5 +288,77 @@ describe("provideSecrets", () => {
 
   it("rejects a kubectl provider without config", () => {
     expect(() => provideSecrets({ provider: "kubectl" })).toThrow();
+  });
+});
+
+/** A SecretSource that counts calls and can be made slow, for exercising the caching decorator. */
+class CountingSource implements SecretSource {
+  calls = 0;
+  #values: Record<string, string>;
+  #delayMs: number;
+  constructor(values: Record<string, string>, delayMs = 0) {
+    this.#values = values;
+    this.#delayMs = delayMs;
+  }
+  async get(key: string): Promise<string | undefined> {
+    this.calls += 1;
+    if (this.#delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.#delayMs));
+    }
+    return this.#values[key];
+  }
+  getRequired(key: string): Promise<string> {
+    return getRequired(this, key);
+  }
+  ping(): Promise<void> {
+    return Promise.resolve();
+  }
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
+describe("CachingSecretSource (PERF-2)", () => {
+  it("memoizes a positive lookup within the TTL", async () => {
+    const inner = new CountingSource({ token: "abc" });
+    const cache = new CachingSecretSource(inner, { ttlMs: 10_000 });
+
+    expect(await cache.get("token")).toBe("abc");
+    expect(await cache.get("token")).toBe("abc");
+    expect(inner.calls).toBe(1); // second read served from cache
+  });
+
+  it("does not cache a miss (re-checks every time)", async () => {
+    const inner = new CountingSource({});
+    const cache = new CachingSecretSource(inner, { ttlMs: 10_000 });
+
+    expect(await cache.get("absent")).toBeUndefined();
+    expect(await cache.get("absent")).toBeUndefined();
+    expect(inner.calls).toBe(2); // a newly-created secret must be seen promptly
+  });
+
+  it("de-duplicates concurrent lookups of the same key into one upstream call", async () => {
+    const inner = new CountingSource({ token: "abc" }, 20);
+    const cache = new CachingSecretSource(inner, { ttlMs: 10_000 });
+
+    const [a, b, c] = await Promise.all([
+      cache.get("token"),
+      cache.get("token"),
+      cache.get("token"),
+    ]);
+
+    expect([a, b, c]).toStrictEqual(["abc", "abc", "abc"]);
+    expect(inner.calls).toBe(1); // three concurrent reads collapsed to one
+  });
+
+  it("closes the wrapped source", async () => {
+    const inner = new CountingSource({});
+    let closed = false;
+    inner.close = () => {
+      closed = true;
+      return Promise.resolve();
+    };
+    await new CachingSecretSource(inner).close();
+    expect(closed).toBe(true);
   });
 });

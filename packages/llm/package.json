@@ -33,6 +33,7 @@
   },
   "dependencies": {
     "@primandproper/observability": "workspace:*",
+    "@primandproper/retry": "workspace:*",
     "zod": "3.25.76"
   }
 }

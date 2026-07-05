@@ -1,4 +1,8 @@
-import { makeObserver, type ObservabilityDeps } from "@primandproper/observability";
+import {
+  makeMetrics,
+  makeObserver,
+  type ObservabilityDeps,
+} from "@primandproper/observability";
 
 import type { AsyncNotifier } from "./async.js";
 import {
@@ -96,13 +100,25 @@ export function providePushSender(
   }
 
   const logger = (deps?.observer ?? makeObserver(mobileO11yName, deps)).logger();
+  // A platform that silently fails to initialize (bad .p8, malformed service account) drops every
+  // push for that platform; surface it at error with a counter rather than an invisible debug line.
+  const initFailures = makeMetrics(mobileO11yName, deps?.metrics).counter(
+    "notifications.push.init_failures",
+    {
+      description:
+        "Push platform initializations that failed and disabled that platform.",
+    },
+  );
 
   let apnsSender: ApnsSender | undefined;
   if (cfg.apns !== undefined) {
     try {
       apnsSender = new ApnsSender(newApnsClient(cfg.apns), cfg.apns.bundleID, deps);
     } catch (err) {
-      logger.with({ error: err }).debug("APNs sender init failed, iOS push disabled");
+      initFailures.add(1, { platform: "apns" });
+      logger.error("APNs sender init failed, iOS push disabled", err, {
+        platform: "apns",
+      });
     }
   }
 
@@ -111,12 +127,15 @@ export function providePushSender(
     try {
       fcmSender = new FcmSender(newFcmClient(cfg.fcm), deps);
     } catch (err) {
-      logger.with({ error: err }).debug("FCM sender init failed, Android push disabled");
+      initFailures.add(1, { platform: "fcm" });
+      logger.error("FCM sender init failed, Android push disabled", err, {
+        platform: "fcm",
+      });
     }
   }
 
   if (apnsSender === undefined && fcmSender === undefined) {
-    logger.debug("no platform senders available, using noop");
+    logger.warn("no platform senders available, using noop");
     return new NoopPushNotificationSender();
   }
 

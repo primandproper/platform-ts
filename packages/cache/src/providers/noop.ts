@@ -17,4 +17,8 @@ export class NoopCache<T> implements Cache<T> {
   ping(): Promise<void> {
     return Promise.resolve();
   }
+
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
 }

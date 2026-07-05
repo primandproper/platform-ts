@@ -72,4 +72,12 @@ export interface FeatureFlagManager {
 
   /** Returns every known flag evaluated for the given context. */
   allFlags(context?: EvaluationContext): Promise<Record<string, FlagValue>>;
+
+  /**
+   * Shuts the manager down, flushing and releasing any resources the backing provider holds —
+   * buffered analytics events (LaunchDarkly, PostHog) and background pollers that would otherwise
+   * keep the process alive. Managers that hold nothing (static, noop) resolve immediately.
+   * Idempotent — safe to call more than once.
+   */
+  close(): Promise<void>;
 }

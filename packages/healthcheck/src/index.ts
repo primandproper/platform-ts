@@ -41,6 +41,11 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Whether an error is an abort (a `DOMException`/`Error` named `AbortError`). */
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
 /**
  * Builds a {@link Checker} from a plain async function. The function reports health by what it
  * returns: a resolved `void` is `healthy`, a {@link CheckResult} partial overrides the
@@ -62,6 +67,12 @@ export function checker(
         const partial = await runWithTimeout(fn, signal, opts.timeoutMs);
         return { status: "healthy", durationMs: duration(), ...(partial ?? {}) };
       } catch (err) {
+        // A caller-initiated cancellation is not a health signal — propagate it rather than
+        // reporting the component `unhealthy`. The `timeoutMs` backstop rejects with a plain
+        // (non-AbortError) timeout error, so it still surfaces as unhealthy below.
+        if (signal?.aborted && isAbortError(err)) {
+          throw err;
+        }
         return { status: "unhealthy", error: errorMessage(err), durationMs: duration() };
       }
     },
@@ -117,6 +128,20 @@ function aggregate(results: readonly CheckResult[]): HealthStatus {
 
 const o11yName = "healthcheck";
 
+/** The registry-wide per-check deadline applied when a checker brings no `timeoutMs` of its own. */
+const DEFAULT_CHECK_TIMEOUT_MS = 10_000;
+
+/** Options for {@link HealthRegistry}. */
+export interface HealthRegistryOptions {
+  /**
+   * Registry-wide deadline (ms) applied to *every* check as a backstop, so a checker built without
+   * its own `timeoutMs` can't hang the whole report forever. A check that outlives it reports
+   * `unhealthy` with a timeout error. Defaults to {@link DEFAULT_CHECK_TIMEOUT_MS}; set `0` to
+   * disable (opt back into unbounded checks).
+   */
+  checkTimeoutMs?: number;
+}
+
 /**
  * Collects {@link Checker}s and runs them concurrently into a single {@link HealthReport}.
  * The aggregate is `unhealthy` if any check is, else `degraded` if any is, else `healthy`;
@@ -127,10 +152,13 @@ export class HealthRegistry {
   readonly #checkers = new Map<string, Checker>();
   readonly #observer: Observer;
   readonly #logger: Logger;
+  readonly #checkTimeoutMs: number | undefined;
 
-  constructor(deps: ObservabilityDeps = {}) {
+  constructor(deps: ObservabilityDeps = {}, options: HealthRegistryOptions = {}) {
     this.#observer = deps.observer ?? makeObserver(o11yName, deps);
     this.#logger = this.#observer.logger();
+    const timeout = options.checkTimeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS;
+    this.#checkTimeoutMs = timeout > 0 ? timeout : undefined;
   }
 
   /** Adds a checker, replacing any existing checker of the same name. */
@@ -148,12 +176,62 @@ export class HealthRegistry {
     const entries = [...this.#checkers.values()];
     this.#logger.debug("running health checks");
     const results = await Promise.all(
-      entries.map(async (c) => [c.name, await c.check(signal)] as const),
+      entries.map(async (c) => [c.name, await this.#runChecker(c, signal)] as const),
     );
     const checks: Record<string, CheckResult> = {};
     for (const [name, result] of results) {
       checks[name] = result;
     }
     return { status: aggregate(results.map(([, result]) => result)), checks };
+  }
+
+  /**
+   * Runs one checker inside its own span, tagging the span/log with the check name and outcome
+   * and surfacing a failing component in the logs: `unhealthy` logs at error, `degraded` at
+   * warn, healthy stays quiet. An unhealthy result is a value rather than a throw, so it is
+   * logged explicitly instead of routed through `op.error`.
+   */
+  #runChecker(c: Checker, signal?: AbortSignal): Promise<CheckResult> {
+    return this.#observer.run("check", async (op) => {
+      op.set("check", c.name);
+      const result = await this.#raceDeadline(c, signal);
+      op.set("status", result.status);
+      if (result.status === "unhealthy") {
+        op.logger().error(`health check '${c.name}' is unhealthy`, result.error);
+      } else if (result.status === "degraded") {
+        op.logger().warn(`health check '${c.name}' is degraded`, {
+          detail: result.detail,
+        });
+      }
+      return result;
+    });
+  }
+
+  /**
+   * Runs one checker under the registry deadline. A checker with its own (shorter) `timeoutMs`
+   * still resolves first; this only backstops one that would otherwise hang the whole report.
+   */
+  async #raceDeadline(c: Checker, signal?: AbortSignal): Promise<CheckResult> {
+    if (this.#checkTimeoutMs === undefined) {
+      return c.check(signal);
+    }
+    const start = performance.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<CheckResult>((resolve) => {
+      timer = setTimeout(() => {
+        resolve({
+          status: "unhealthy",
+          error: `health check '${c.name}' exceeded the registry deadline of ${String(this.#checkTimeoutMs)}ms`,
+          durationMs: performance.now() - start,
+        });
+      }, this.#checkTimeoutMs);
+    });
+    try {
+      return await Promise.race([c.check(signal), deadline]);
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
   }
 }

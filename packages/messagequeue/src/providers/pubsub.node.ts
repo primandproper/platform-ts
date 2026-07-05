@@ -15,7 +15,8 @@ import {
 } from "../messagequeue.js";
 
 import {
-  consumedCounter,
+  consumerInstruments,
+  type ConsumerInstruments,
   encodeJSON,
   LENGTH_KEY,
   publisherInstruments,
@@ -47,7 +48,7 @@ class PubSubPublisher implements Publisher {
   constructor(topic: Topic, topicName: string, deps?: ObservabilityDeps) {
     this.#topic = topic;
     this.#topicName = topicName;
-    this.#observer = makeObserver(`${topicName}_publisher`, deps);
+    this.#observer = deps?.observer ?? makeObserver(`${topicName}_publisher`, deps);
     this.#instruments = publisherInstruments(deps, topicName);
   }
 
@@ -84,9 +85,14 @@ class PubSubPublisher implements Publisher {
     });
   }
 
-  stop(): void {
-    // Flush any batched-but-unsent messages; mirrors Go's `pubSubPublisher.Stop`.
-    this.#topic.flush().catch(() => undefined);
+  async stop(): Promise<void> {
+    // Await the flush of any batched-but-unsent messages so they are not dropped on shutdown;
+    // mirrors Go's `pubSubPublisher.Stop`, now awaitable.
+    try {
+      await this.#topic.flush();
+    } catch (err) {
+      this.#observer.logger().error("flushing pubsub topic on stop", err);
+    }
   }
 }
 
@@ -115,9 +121,13 @@ export class PubSubPublisherProvider implements PublisherProvider {
     return Promise.resolve();
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    // Flush every cached publisher's batched messages before tearing the client down, so a
+    // shutdown does not drop buffered sends.
+    const publishers = [...this.#cache.values()];
     this.#cache.clear();
-    this.#client.close().catch(() => undefined);
+    await Promise.allSettled(publishers.map(async (p) => (await p).stop()));
+    await this.#client.close();
   }
 }
 
@@ -126,7 +136,7 @@ class PubSubConsumer implements Consumer {
   readonly #topic: string;
   readonly #handler: ConsumerFunc;
   readonly #observer: Observer;
-  readonly #consumed: ReturnType<typeof consumedCounter>;
+  readonly #instruments: ConsumerInstruments;
 
   constructor(
     client: PubSub,
@@ -137,8 +147,8 @@ class PubSubConsumer implements Consumer {
     this.#client = client;
     this.#topic = topic;
     this.#handler = handler;
-    this.#observer = makeObserver(`${topic}_consumer`, deps);
-    this.#consumed = consumedCounter(deps, topic);
+    this.#observer = deps?.observer ?? makeObserver(`${topic}_consumer`, deps);
+    this.#instruments = consumerInstruments(deps, topic);
   }
 
   async consume(signal?: AbortSignal, onError?: (err: unknown) => void): Promise<void> {
@@ -172,12 +182,12 @@ class PubSubConsumer implements Consumer {
         "delivery_attempt",
         message.deliveryAttempt,
       );
-      this.#consumed.add(1);
-
       try {
         await this.#handler(new Uint8Array(message.data));
+        this.#instruments.consumed.add(1);
         message.ack();
       } catch (err) {
+        this.#instruments.consumeErrors.add(1);
         op.acknowledge(err, "handling pubsub message");
         message.nack();
         onError?.(err);
@@ -201,8 +211,15 @@ export class PubSubConsumerProvider implements ConsumerProvider {
     if (topic === "") {
       return Promise.reject(ErrEmptyTopicName);
     }
-    return this.#cache.getOrBuild(topic, () =>
-      Promise.resolve(new PubSubConsumer(this.#client, topic, handler, this.#deps)),
+    return this.#cache.getOrBuild(
+      topic,
+      () => Promise.resolve(new PubSubConsumer(this.#client, topic, handler, this.#deps)),
+      handler,
     );
+  }
+
+  async close(): Promise<void> {
+    this.#cache.clear();
+    await this.#client.close();
   }
 }

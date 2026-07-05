@@ -5,15 +5,20 @@ import {
   type Observer,
 } from "@primandproper/observability";
 
-import type { DefaultCookieOptions } from "../config.js";
 import type { CookieStore } from "../cookies.js";
-import { parseCookieHeader, serializeCookie, type CookieOptions } from "../serialize.js";
+import {
+  cookieByteLength,
+  MAX_COOKIE_BYTES,
+  parseCookieHeader,
+  serializeCookie,
+  type CookieOptions,
+} from "../serialize.js";
 
 const o11yName = "cookies";
 
 export interface DocumentCookieStoreOptions {
   /** Attributes merged under every `set`/`delete` call. */
-  defaults?: DefaultCookieOptions;
+  defaults?: CookieOptions;
 }
 
 /**
@@ -40,7 +45,16 @@ export class DocumentCookieStore implements CookieStore {
   }
 
   set(name: string, value: string, options: CookieOptions = {}): void {
-    document.cookie = serializeCookie(name, value, { ...this.#defaults, ...options });
+    const serialized = serializeCookie(name, value, { ...this.#defaults, ...options });
+    const bytes = cookieByteLength(serialized);
+    if (bytes > MAX_COOKIE_BYTES) {
+      this.#logger.warn("cookie exceeds size limit and may be dropped by the browser", {
+        name,
+        bytes,
+        limit: MAX_COOKIE_BYTES,
+      });
+    }
+    document.cookie = serialized;
     this.#logger.debug("cookie set");
   }
 

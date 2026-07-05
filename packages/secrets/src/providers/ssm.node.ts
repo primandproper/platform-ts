@@ -15,6 +15,9 @@ import { NAME_KEY, secretInstruments, type SecretInstruments } from "./support.j
 
 const sourceName = "ssm_secret_source";
 
+/** Sentinel name probed by {@link SSMSecretSource.ping}; a ParameterNotFound still proves reachability. */
+const PING_PROBE_NAME = "__platform_ping_probe__";
+
 /**
  * Minimal SSM Parameter Store seam — the analogue of Go's `GetParameterAPI`. `get` returns
  * `undefined` for a parameter that does not exist so a miss stays a miss; other failures
@@ -125,9 +128,21 @@ export class SSMSecretSource implements SecretSource {
     return getRequired(this, key);
   }
 
-  // SSM is a managed service with no connection to probe.
+  /**
+   * Probes reachability + credentials by getting a sentinel parameter. A ParameterNotFound
+   * resolves to `undefined` (proving the endpoint is reachable and credentials work) while an
+   * auth/network failure throws — so a broken config fails here rather than on the first real `get`.
+   */
   ping(): Promise<void> {
-    return Promise.resolve();
+    return this.#observer.run("ping", async (op) => {
+      const paramName = this.#resolveName(PING_PROBE_NAME);
+      op.set(NAME_KEY, paramName);
+      try {
+        await this.#client.get(paramName);
+      } catch (err) {
+        throw op.error(err, "pinging ssm parameter store");
+      }
+    });
   }
 
   close(): Promise<void> {

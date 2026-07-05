@@ -58,6 +58,12 @@ export const UploadsConfigSchema = z
       .default(MEMORY_PROVIDER),
     bucketName: z.string().min(1, "bucketName is required"),
     bucketPrefix: z.string().default(""),
+    /**
+     * Maximum bytes accepted by a single `save`. `0` (default) disables the backstop. A byte
+     * body over the limit is rejected before the write; a stream body errors mid-transfer once it
+     * crosses the limit (no full-payload buffering).
+     */
+    maxSizeBytes: z.number().int().nonnegative().default(0),
     filesystem: FilesystemConfigSchema.optional(),
     r2: R2ConfigSchema.optional(),
     backblazeB2: BackblazeB2ConfigSchema.optional(),

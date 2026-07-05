@@ -20,14 +20,27 @@ export function provideCache<T>(
   const cfg = NodeCacheConfigSchema.parse(config ?? {});
   switch (cfg.provider) {
     case "memory":
-      return new InMemoryCache<T>({ expiryMs: cfg.expiryMs }, deps);
+      return new InMemoryCache<T>(
+        { expiryMs: cfg.expiryMs, maxEntries: cfg.maxEntries },
+        deps,
+      );
     case "redis":
       // superRefine guarantees this, but narrow for the type checker.
       if (cfg.redis === undefined) {
         throw new Error("redis config is required when provider is 'redis'");
       }
       return new RedisCache<T>(
-        { url: cfg.redis.url, keyPrefix: cfg.redis.keyPrefix, expiryMs: cfg.expiryMs },
+        {
+          url: cfg.redis.url,
+          keyPrefix: cfg.redis.keyPrefix,
+          expiryMs: cfg.expiryMs,
+          ...(cfg.redis.commandTimeoutMs !== undefined
+            ? { commandTimeoutMs: cfg.redis.commandTimeoutMs }
+            : {}),
+          ...(cfg.redis.connectTimeoutMs !== undefined
+            ? { connectTimeoutMs: cfg.redis.connectTimeoutMs }
+            : {}),
+        },
         deps,
       );
     case "noop":

@@ -9,6 +9,12 @@ export interface Cache<T> {
   delete(key: string): Promise<void>;
   /** Verifies the backing store is reachable. */
   ping(): Promise<void>;
+  /**
+   * Releases any resources the cache holds (e.g. a Redis connection) so the process can exit
+   * gracefully. Providers that hold nothing resolve immediately; providers handed a shared client
+   * leave it open for its owner. Idempotent — safe to call more than once.
+   */
+  close(): Promise<void>;
 }
 
 /**

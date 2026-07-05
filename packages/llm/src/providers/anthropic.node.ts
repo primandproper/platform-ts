@@ -1,16 +1,28 @@
 import {
   makeObserver,
-  type Logger,
   type ObservabilityDeps,
   type Observer,
 } from "@primandproper/observability";
+import type { Policy, RetryConfig } from "@primandproper/retry";
 
 import type {
+  CompletionChunk,
   CompletionRequest,
   CompletionResponse,
   LLMProvider,
   Message,
+  Usage,
 } from "../llm.js";
+
+import {
+  DEFAULT_LLM_TIMEOUT_MS,
+  requestIdFromResponse,
+  resilientFetch,
+  retryPolicy,
+  sseDataLines,
+  tokenInstruments,
+  type TokenInstruments,
+} from "./support.js";
 
 const o11yName = "llm";
 
@@ -27,6 +39,10 @@ export interface AnthropicLLMProviderOptions {
   baseUrl: string;
   /** The default `max_tokens` when a request omits one. Anthropic requires this field. */
   maxTokens: number;
+  /** Per-completion deadline in milliseconds; `0` disables it. Defaults to 30s. */
+  timeoutMs?: number;
+  /** Optional retry policy for transient failures (network/timeout, 429/5xx). Off by default. */
+  retry?: RetryConfig | undefined;
   /** The `fetch` implementation. Defaults to `globalThis.fetch`. */
   fetch?: FetchLike;
 }
@@ -57,8 +73,10 @@ export class AnthropicLLMProvider implements LLMProvider {
   readonly #baseUrl: string;
   readonly #maxTokens: number;
   readonly #fetch: FetchLike;
+  readonly #timeoutMs: number;
+  readonly #retry: Policy | undefined;
   readonly #observer: Observer;
-  readonly #logger: Logger;
+  readonly #tokens: TokenInstruments;
 
   constructor(options: AnthropicLLMProviderOptions, deps: ObservabilityDeps = {}) {
     this.#apiKey = options.apiKey;
@@ -66,11 +84,91 @@ export class AnthropicLLMProvider implements LLMProvider {
     this.#baseUrl = options.baseUrl;
     this.#maxTokens = options.maxTokens;
     this.#fetch = resolveFetch(options.fetch);
+    this.#timeoutMs = options.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS;
     this.#observer = deps.observer ?? makeObserver(o11yName, deps);
-    this.#logger = this.#observer.logger();
+    this.#retry = retryPolicy(options.retry, this.#observer.logger());
+    this.#tokens = tokenInstruments(o11yName, deps);
   }
 
-  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+  complete(request: CompletionRequest): Promise<CompletionResponse> {
+    return this.#observer.run("complete", async (op) => {
+      const model = request.model ?? this.#model;
+      op.set("model", model);
+      const { messages, system } = splitSystem(request.messages, request.system);
+
+      const body: {
+        model: string;
+        max_tokens: number;
+        messages: Message[];
+        system?: string;
+        temperature?: number;
+      } = {
+        model,
+        max_tokens: request.maxTokens ?? this.#maxTokens,
+        messages,
+      };
+      if (system !== "") {
+        body.system = system;
+      }
+      if (request.temperature !== undefined) {
+        body.temperature = request.temperature;
+      }
+
+      const response = await resilientFetch(
+        (signal) =>
+          this.#fetch(this.#baseUrl, {
+            method: "POST",
+            headers: {
+              "x-api-key": this.#apiKey,
+              "anthropic-version": ANTHROPIC_VERSION,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify(body),
+            ...(signal === undefined ? {} : { signal }),
+          }),
+        { timeoutMs: this.#timeoutMs, retry: this.#retry, signal: request.signal },
+      );
+
+      if (!response.ok) {
+        const text = await response.text();
+        const requestId = requestIdFromResponse(response, "request-id", "x-request-id");
+        if (requestId !== undefined) {
+          op.set("requestId", requestId);
+        }
+        throw op.error(
+          new Error(`anthropic request failed: ${String(response.status)} ${text}`),
+          `anthropic completion failed with status ${String(response.status)}`,
+        );
+      }
+
+      const data = (await response.json()) as AnthropicResponseBody;
+      const text = (data.content ?? [])
+        .filter((block) => block.type === "text" && block.text !== undefined)
+        .map((block) => block.text ?? "")
+        .join("");
+
+      const result: CompletionResponse = { text, model: data.model ?? model };
+      if (data.stop_reason !== undefined) {
+        result.stopReason = data.stop_reason;
+      }
+      if (data.usage !== undefined) {
+        const usage = {
+          inputTokens: data.usage.input_tokens ?? 0,
+          outputTokens: data.usage.output_tokens ?? 0,
+        };
+        result.usage = usage;
+        op.set("llm.tokens.input", usage.inputTokens).set(
+          "llm.tokens.output",
+          usage.outputTokens,
+        );
+        this.#tokens.inputTokens.add(usage.inputTokens, { model });
+        this.#tokens.outputTokens.add(usage.outputTokens, { model });
+      }
+      return result;
+    });
+  }
+
+  async *completeStream(request: CompletionRequest): AsyncGenerator<CompletionChunk> {
     const model = request.model ?? this.#model;
     const { messages, system } = splitSystem(request.messages, request.system);
 
@@ -78,12 +176,14 @@ export class AnthropicLLMProvider implements LLMProvider {
       model: string;
       max_tokens: number;
       messages: Message[];
+      stream: true;
       system?: string;
       temperature?: number;
     } = {
       model,
       max_tokens: request.maxTokens ?? this.#maxTokens,
       messages,
+      stream: true,
     };
     if (system !== "") {
       body.system = system;
@@ -92,6 +192,9 @@ export class AnthropicLLMProvider implements LLMProvider {
       body.temperature = request.temperature;
     }
 
+    // Streaming imposes no timeout — a long generation legitimately outlives one; only the
+    // caller's signal cancels it. Retry is likewise inapplicable mid-stream (no resume point).
+    this.#observer.logger().debug("streaming completion", { model });
     const response = await this.#fetch(this.#baseUrl, {
       method: "POST",
       headers: {
@@ -100,42 +203,82 @@ export class AnthropicLLMProvider implements LLMProvider {
         "content-type": "application/json",
       },
       body: JSON.stringify(body),
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
     });
 
     if (!response.ok) {
       const text = await response.text();
-      this.#logger.error(
-        `anthropic completion failed with status ${String(response.status)}`,
-      );
-      throw new Error(`anthropic request failed: ${String(response.status)} ${text}`);
+      throw new Error(`anthropic stream failed: ${String(response.status)} ${text}`);
     }
 
-    const data = (await response.json()) as AnthropicResponseBody;
-    const text = (data.content ?? [])
-      .filter((block) => block.type === "text" && block.text !== undefined)
-      .map((block) => block.text ?? "")
-      .join("");
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let stopReason: string | undefined;
+    for await (const data of sseDataLines(response.body)) {
+      const event = JSON.parse(data) as AnthropicStreamEvent;
+      switch (event.type) {
+        case "message_start":
+          inputTokens = event.message?.usage?.input_tokens ?? inputTokens;
+          break;
+        case "content_block_delta":
+          if (event.delta?.type === "text_delta") {
+            yield { delta: event.delta.text ?? "" };
+          }
+          break;
+        case "message_delta":
+          stopReason = event.delta?.stop_reason ?? stopReason;
+          outputTokens = event.usage?.output_tokens ?? outputTokens;
+          break;
+        default:
+          break;
+      }
+    }
 
-    const result: CompletionResponse = { text, model: data.model ?? model };
-    if (data.stop_reason !== undefined) {
-      result.stopReason = data.stop_reason;
-    }
-    if (data.usage !== undefined) {
-      result.usage = {
-        inputTokens: data.usage.input_tokens ?? 0,
-        outputTokens: data.usage.output_tokens ?? 0,
-      };
-    }
-    return result;
+    this.#tokens.inputTokens.add(inputTokens, { model });
+    this.#tokens.outputTokens.add(outputTokens, { model });
+    const usage: Usage = { inputTokens, outputTokens };
+    yield stopReason === undefined
+      ? { delta: "", usage }
+      : { delta: "", stopReason, usage };
   }
 
   /**
-   * Resolves immediately without calling the API — a reachability probe here would burn an
-   * API call for no signal. Construction validates the configuration that matters.
+   * Validates reachability and the API key against Anthropic's free, authenticated
+   * `GET /v1/models` endpoint (no tokens billed). Rejects when the key is invalid or the API is
+   * unreachable, so a caller can fail fast at startup instead of on the first real completion.
    */
   ping(): Promise<void> {
-    return Promise.resolve();
+    return this.#observer.run("ping", async (op) => {
+      const url = new URL("/v1/models", this.#baseUrl).toString();
+      const response = await resilientFetch(
+        (signal) =>
+          this.#fetch(url, {
+            method: "GET",
+            headers: {
+              "x-api-key": this.#apiKey,
+              "anthropic-version": ANTHROPIC_VERSION,
+            },
+            ...(signal === undefined ? {} : { signal }),
+          }),
+        { timeoutMs: this.#timeoutMs, retry: this.#retry },
+      );
+      if (!response.ok) {
+        const text = await response.text();
+        throw op.error(
+          new Error(`anthropic ping failed: ${String(response.status)} ${text}`),
+          `anthropic ping failed with status ${String(response.status)}`,
+        );
+      }
+    });
   }
+}
+
+/** The slice of Anthropic's `message_*`/`content_block_delta` stream events this provider reads. */
+interface AnthropicStreamEvent {
+  type?: string;
+  delta?: { type?: string; text?: string; stop_reason?: string };
+  message?: { usage?: { input_tokens?: number } };
+  usage?: { output_tokens?: number };
 }
 
 /**

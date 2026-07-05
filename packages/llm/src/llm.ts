@@ -19,6 +19,12 @@ export interface CompletionRequest {
   maxTokens?: number;
   temperature?: number;
   system?: string;
+  /**
+   * Cancels the request. For {@link LLMProvider.complete} it combines with the provider's
+   * timeout; for {@link LLMProvider.completeStream} it is the only cancellation signal (a
+   * streaming generation legitimately outlives any fixed timeout, so no deadline is imposed).
+   */
+  signal?: AbortSignal;
 }
 
 /** Token usage reported by the provider, when available. */
@@ -36,6 +42,17 @@ export interface CompletionResponse {
 }
 
 /**
+ * One incremental event from {@link LLMProvider.completeStream}. `delta` is the text produced by
+ * this event (possibly empty on a non-text event); the final event carries `stopReason`/`usage`
+ * when the vendor reports them, so a consumer can accumulate `delta`s and read the tail metadata.
+ */
+export interface CompletionChunk {
+  delta: string;
+  stopReason?: string;
+  usage?: Usage;
+}
+
+/**
  * The chat-completion contract. Provider implementations live under `providers/` and are
  * selected by config — the same shape backs the deterministic `echo`/`noop` providers and
  * the REST providers (Anthropic, OpenAI).
@@ -43,6 +60,13 @@ export interface CompletionResponse {
 export interface LLMProvider {
   /** Generates a completion for the conversation. */
   complete(request: CompletionRequest): Promise<CompletionResponse>;
+  /**
+   * Streams a completion as incremental {@link CompletionChunk}s. The returned async iterable
+   * yields text deltas as the vendor produces them, so a long generation is surfaced token-by-token
+   * instead of buffered whole (which is likeliest to hit intermediary timeouts). Iterate to
+   * completion, or stop early / abort via `request.signal` to cancel the underlying connection.
+   */
+  completeStream(request: CompletionRequest): AsyncIterable<CompletionChunk>;
   /** Verifies the backing provider is reachable. */
   ping(): Promise<void>;
 }

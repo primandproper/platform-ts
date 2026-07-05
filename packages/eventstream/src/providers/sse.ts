@@ -7,6 +7,8 @@ import {
 
 import { EventStreamEmitter } from "./emitter.js";
 import {
+  EVENT_SOURCE_CLOSED,
+  EVENT_SOURCE_CONNECTING,
   globalCtor,
   type EventSourceCtor,
   type EventSourceLike,
@@ -29,6 +31,11 @@ export interface SseEventStreamOptions {
    * (e.g. from `undici` or the `eventsource` package) on Node < 22, or a fake in tests.
    */
   eventSourceCtor?: EventSourceCtor;
+  /**
+   * Liveness deadline in ms: if no event arrives within this window the connection is assumed
+   * half-open and reopened with a fresh `EventSource`. `0`/omitted disables it.
+   */
+  heartbeatTimeoutMs?: number;
 }
 
 /**
@@ -43,9 +50,16 @@ export class SseEventStream extends EventStreamEmitter {
   readonly #observer: Observer;
   readonly #logger: Logger;
   #source: EventSourceLike | undefined;
+  // Named-event listeners registered on the current source, retained so they can be removed when
+  // the source is torn down (a reconnect creates a fresh source, so leaving them attached leaks).
+  #namedListeners: { type: string; listener: (ev: EventSourceMessage) => void }[] = [];
 
   constructor(options: SseEventStreamOptions, deps: ObservabilityDeps = {}) {
-    super();
+    // super() must be the first statement (field initializers below), so derive the logger inline.
+    super(
+      options.heartbeatTimeoutMs ?? 0,
+      (deps.observer ?? makeObserver(o11yName, deps)).logger(),
+    );
     const ctor =
       options.eventSourceCtor ??
       (globalCtor("EventSource") as EventSourceCtor | undefined);
@@ -62,12 +76,22 @@ export class SseEventStream extends EventStreamEmitter {
     this.#logger = this.#observer.logger();
   }
 
+  protected override onHeartbeatTimeout(): void {
+    this.#logger.warn("SSE heartbeat timeout; reopening connection");
+    this.dispatchError(new Error("SSE heartbeat timeout"));
+    // A half-open EventSource won't fire onerror on its own, so force a fresh connection.
+    this.#detachSource();
+    this.dispatchReconnecting();
+    this.openTransport();
+  }
+
   protected openTransport(): void {
     this.#logger.debug("opening SSE connection");
     const source = new this.#ctor(this.#url);
     this.#source = source;
 
     source.onopen = () => {
+      this.#logger.info("SSE connection open");
       this.dispatchOpen();
     };
     source.onmessage = (ev: EventSourceMessage) => {
@@ -76,24 +100,46 @@ export class SseEventStream extends EventStreamEmitter {
     source.onerror = (ev: unknown) => {
       this.#logger.error("SSE connection error", ev);
       this.dispatchError(ev);
+      // EventSource multiplexes transient reconnects and fatal give-ups through one error event;
+      // consult readyState so `state` and `onClose` stop lying. CLOSED = it gave up (fire close);
+      // CONNECTING = it dropped and is retrying (reflect as connecting, not still-open).
+      if (source.readyState === EVENT_SOURCE_CLOSED) {
+        this.#logger.warn("SSE closed after fatal error");
+        this.close();
+      } else if (source.readyState === EVENT_SOURCE_CONNECTING) {
+        this.#logger.debug("SSE dropped; reconnecting");
+        this.dispatchReconnecting();
+      }
     };
     for (const event of this.#events) {
-      source.addEventListener(event, (ev: EventSourceMessage) => {
+      const listener = (ev: EventSourceMessage): void => {
         this.dispatchMessage({ event, data: ev.data, ...idOf(ev) });
-      });
+      };
+      source.addEventListener(event, listener);
+      this.#namedListeners.push({ type: event, listener });
     }
   }
 
   protected closeTransport(): void {
+    this.#detachSource();
+    this.#logger.debug("closed SSE connection");
+  }
+
+  /** Detaches handlers and closes the current source without touching lifecycle state. */
+  #detachSource(): void {
     if (this.#source === undefined) {
       return;
     }
     this.#source.onopen = null;
     this.#source.onmessage = null;
     this.#source.onerror = null;
+    // Remove the named-event listeners we attached so a torn-down source leaves nothing behind.
+    for (const { type, listener } of this.#namedListeners) {
+      this.#source.removeEventListener(type, listener);
+    }
+    this.#namedListeners = [];
     this.#source.close();
     this.#source = undefined;
-    this.#logger.debug("closed SSE connection");
   }
 }
 

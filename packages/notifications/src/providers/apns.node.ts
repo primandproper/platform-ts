@@ -53,6 +53,8 @@ export interface ApnsPushResult {
  */
 export interface ApnsClient {
   send(notification: ApnsNotification, deviceToken: string): Promise<ApnsPushResult>;
+  /** Releases the underlying APNs connection pool. Optional so injected fakes need not implement it. */
+  close?(): Promise<void>;
 }
 
 /** Builds an {@link ApnsClient} backed by the real `@parse/node-apn` provider. */
@@ -77,13 +79,18 @@ export function newApnsClient(config: ApnsConfig): ApnsClient {
       }
       return provider.send(note, deviceToken);
     },
+    close() {
+      // Drains and closes the APNs HTTP/2 connection pool so it stops pinning the event loop.
+      return provider.shutdown();
+    },
   };
 }
 
 /**
  * Sends push notifications to iOS devices via APNs. Faithful to Go's `apns.Sender`: it guards the
- * device-token format, sets `title` on the operation, sends at high priority, and records
- * `status`/`reason` on failure. `badgeCount`, when set, maps to `aps.badge`.
+ * device-token format, sends at high priority, and records `status`/`reason` on failure. The
+ * notification title is user content, so it is deliberately kept out of telemetry (INST-7).
+ * `badgeCount`, when set, maps to `aps.badge`.
  */
 export class ApnsSender {
   readonly #client: ApnsClient;
@@ -113,8 +120,6 @@ export class ApnsSender {
           "validating device token",
         );
       }
-
-      op.set("title", title);
 
       const notification: ApnsNotification = {
         alert: { title, body },
@@ -146,5 +151,10 @@ export class ApnsSender {
 
       this.#instruments.sends.add(1);
     });
+  }
+
+  /** Releases the APNs connection pool. Idempotent; a no-op for a client without `close`. */
+  async close(): Promise<void> {
+    await this.#client.close?.();
   }
 }

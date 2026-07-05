@@ -21,7 +21,10 @@ export function provideCache<T>(
   const cfg = BrowserCacheConfigSchema.parse(config ?? {});
   switch (cfg.provider) {
     case "memory":
-      return new InMemoryCache<T>({ expiryMs: cfg.expiryMs }, deps);
+      return new InMemoryCache<T>(
+        { expiryMs: cfg.expiryMs, maxEntries: cfg.maxEntries },
+        deps,
+      );
     case "web":
       return new WebStorageCache<T>(
         { namespace: cfg.namespace, expiryMs: cfg.expiryMs },

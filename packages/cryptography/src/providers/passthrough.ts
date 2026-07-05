@@ -6,6 +6,9 @@ import type { Encryptor } from "../encryption.js";
  * undesirable. Never select it in production — it is the deliberate opposite of secure.
  */
 export class PassthroughEncryptor implements Encryptor {
+  /** Passthrough provides neither confidentiality nor integrity. */
+  readonly authenticated = false;
+
   encrypt(plaintext: Uint8Array): Promise<Uint8Array> {
     return Promise.resolve(plaintext);
   }

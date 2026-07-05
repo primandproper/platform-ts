@@ -1,4 +1,4 @@
-import { XMLBuilder, XMLParser } from "fast-xml-parser";
+import { XMLBuilder, XMLParser, XMLValidator } from "fast-xml-parser";
 
 import { bytesToText, textToBytes } from "../bytes.js";
 import { ContentTypeXML, type ContentType } from "../content-type.js";
@@ -23,6 +23,20 @@ export class XmlCodec implements Codec {
   }
 
   decode(data: Uint8Array): unknown {
-    return this.#parser.parse(bytesToText(data));
+    const text = bytesToText(data);
+    // fast-xml-parser's parser is lenient: non-XML fabricates `{}` and mismatched tags parse
+    // "successfully". Validate first so malformed input fails loudly (the manager's `instrument`
+    // wraps this into an EncodingError, matching how JsonCodec relies on JSON.parse throwing).
+    // XMLValidator carries a @deprecated tag in v5 nudging toward the new `fast-xml-validator`
+    // split-out; it remains the in-package validator and works fine (same call as the XMLBuilder
+    // note above) — revisit if that package matures.
+    // eslint-disable-next-line @typescript-eslint/no-deprecated
+    const validation = XMLValidator.validate(text);
+    if (validation !== true) {
+      throw new Error(
+        `invalid XML: ${validation.err.msg} (line ${String(validation.err.line)})`,
+      );
+    }
+    return this.#parser.parse(text);
   }
 }

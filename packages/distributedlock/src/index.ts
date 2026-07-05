@@ -61,6 +61,9 @@ export function provideDistributedLock(
   if (deps?.metrics !== undefined) {
     memoryDeps.metrics = deps.metrics;
   }
+  if (deps?.observer !== undefined) {
+    memoryDeps.observer = deps.observer;
+  }
   if (deps?.now !== undefined) {
     memoryDeps.now = deps.now;
   }
@@ -81,6 +84,12 @@ export function provideDistributedLock(
           url: cfg.redis.url,
           keyPrefix: cfg.redis.keyPrefix,
           defaultTtlMs: cfg.redis.defaultTtlMs,
+          ...(cfg.redis.commandTimeoutMs !== undefined
+            ? { commandTimeoutMs: cfg.redis.commandTimeoutMs }
+            : {}),
+          ...(cfg.redis.connectTimeoutMs !== undefined
+            ? { connectTimeoutMs: cfg.redis.connectTimeoutMs }
+            : {}),
         },
         memoryDeps,
       );

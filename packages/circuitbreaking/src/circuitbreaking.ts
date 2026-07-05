@@ -14,7 +14,14 @@
  * The analogue of the Go platform's `CircuitBreaker` interface.
  */
 export interface CircuitBreaker {
-  /** Whether the caller may proceed (closed or half-open) rather than being rejected (open). */
+  /**
+   * Gates one guarded attempt: `true` when the caller may proceed (closed, or a half-open probe
+   * slot was available), `false` when rejected (open, or half-open probes exhausted).
+   *
+   * **This is an acquisition, not a pure predicate** — in half-open it consumes a probe slot as a
+   * side effect. Call it exactly once per guarded attempt; a speculative second check burns a
+   * probe. Pair each `true` with a later {@link succeeded}/{@link failed}.
+   */
   canProceed(): boolean;
   /** Reports a successful call, closing a half-open circuit and resetting failure counts. */
   succeeded(): void;

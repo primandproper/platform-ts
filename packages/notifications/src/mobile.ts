@@ -50,20 +50,31 @@ export interface PushNotificationSender {
    * implementations filter by platform.
    */
   sendPush(platform: string, token: string, msg: PushMessage): Promise<void>;
+  /**
+   * Releases the platform senders' resources — the APNs HTTP/2 connection pool and the Firebase
+   * app — so a graceful shutdown isn't blocked by lingering connections/pollers. Mirrors the
+   * `close()` {@link import("./async.js").AsyncNotifier} already carries. Idempotent.
+   */
+  close(): Promise<void>;
 }
 
+/** The message carried by every "platform not supported" error; match on it if needed. */
+export const PLATFORM_NOT_SUPPORTED_MESSAGE =
+  "push notifications not configured for this platform";
+
 /**
- * Returned when sending to a platform that has no configured sender (e.g. an iOS token but APNs
- * unconfigured). Go's `ErrPlatformNotSupported`.
+ * Mints a fresh error for sending to a platform that has no configured sender (e.g. an iOS token
+ * but APNs unconfigured). Go's `ErrPlatformNotSupported`. A factory, not a shared singleton, so
+ * each throw carries a stack captured at the throw site rather than one frozen at module load.
  */
-export const ErrPlatformNotSupported = new Error(
-  "push notifications not configured for this platform",
-);
+export function newPlatformNotSupportedError(): Error {
+  return new Error(PLATFORM_NOT_SUPPORTED_MESSAGE);
+}
 
 /**
  * Routes push notifications to APNs (iOS) or FCM (Android). Faithful to Go's
  * `MultiPlatformPushSender`: it lowercases the platform, records it on the operation, and routes
- * to the matching sender — erroring with {@link ErrPlatformNotSupported} when that sender is
+ * to the matching sender — erroring via {@link newPlatformNotSupportedError} when that sender is
  * absent, and on an unknown platform.
  */
 export class MultiPlatformPushSender implements PushNotificationSender {
@@ -89,12 +100,12 @@ export class MultiPlatformPushSender implements PushNotificationSender {
       switch (normalized) {
         case platformIOS:
           if (this.#apnsSender === undefined) {
-            throw op.error(ErrPlatformNotSupported, "sending apns notification");
+            throw op.error(newPlatformNotSupportedError(), "sending apns notification");
           }
           return this.#apnsSender.send(token, msg.title, msg.body, msg.badgeCount);
         case platformAndroid:
           if (this.#fcmSender === undefined) {
-            throw op.error(ErrPlatformNotSupported, "sending fcm notification");
+            throw op.error(newPlatformNotSupportedError(), "sending fcm notification");
           }
           return this.#fcmSender.send(token, msg.title, msg.body);
         default:
@@ -104,5 +115,10 @@ export class MultiPlatformPushSender implements PushNotificationSender {
           );
       }
     });
+  }
+
+  /** Closes whichever platform senders are configured, so neither leaks its client on shutdown. */
+  async close(): Promise<void> {
+    await Promise.allSettled([this.#apnsSender?.close(), this.#fcmSender?.close()]);
   }
 }

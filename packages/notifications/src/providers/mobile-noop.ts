@@ -8,4 +8,8 @@ export class NoopPushNotificationSender implements PushNotificationSender {
   sendPush(): Promise<void> {
     return Promise.resolve();
   }
+
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
 }

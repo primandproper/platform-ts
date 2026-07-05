@@ -1,11 +1,12 @@
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 import { Storage, type Bucket as GCSBucketHandle } from "@google-cloud/storage";
 import { wrap } from "@primandproper/errors";
 
 import { BlobNotFoundError, type Bucket } from "../bucket.js";
 import type { Attributes, ObjectInfo, SignedURLOptions } from "../capabilities.js";
-import { toBytes, type BlobBody } from "../stream.js";
+import { bytesToStream, type BlobBody } from "../stream.js";
 import type { SaveOptions } from "../uploads.js";
 
 /** HTTP status GCS returns for an absent object. */
@@ -14,7 +15,8 @@ const NOT_FOUND = 404;
 /**
  * A {@link Bucket} backed by Google Cloud Storage — the port of gocloud's `gcsblob`. The client
  * resolves credentials from Application Default Credentials, matching Go's `gcp.DefaultCredentials`.
- * Reads stream; a write drains its body first (the GCS client's `save` takes a buffer).
+ * Both reads and writes stream: a write pipes the body into the GCS resumable upload stream rather
+ * than buffering the whole payload in memory.
  */
 export class GCSBucket implements Bucket {
   readonly #bucket: GCSBucketHandle;
@@ -24,13 +26,15 @@ export class GCSBucket implements Bucket {
   }
 
   async write(key: string, body: BlobBody, opts?: SaveOptions): Promise<void> {
+    const writeStream = this.#bucket.file(key).createWriteStream({
+      ...(opts?.contentType !== undefined && { contentType: opts.contentType }),
+      ...(opts?.cacheControl !== undefined && {
+        metadata: { cacheControl: opts.cacheControl },
+      }),
+    });
+    const source = body instanceof Uint8Array ? bytesToStream(body) : body;
     try {
-      await this.#bucket.file(key).save(Buffer.from(await toBytes(body)), {
-        ...(opts?.contentType !== undefined && { contentType: opts.contentType }),
-        ...(opts?.cacheControl !== undefined && {
-          metadata: { cacheControl: opts.cacheControl },
-        }),
-      });
+      await pipeline(Readable.fromWeb(source), writeStream);
     } catch (err) {
       throw wrap(`gcs write failed for key '${key}'`, err);
     }

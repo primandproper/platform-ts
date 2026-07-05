@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -167,6 +167,17 @@ describe("FilesystemBucket", () => {
     const paths = (await listAll(b, "")).map((o) => o.path);
     expect(paths).toEqual(["note.txt"]);
   });
+
+  // UP-2: the atomic temp+rename write must leave no partial/temp residue behind.
+  it("leaves no temp file after an atomic write", async () => {
+    const b = new FilesystemBucket(dir);
+    await b.write("data/blob.bin", bytesToStream(bytes(1, 2, 3, 4)));
+    expect(await read(await b.openRange("data/blob.bin", 0, -1))).toEqual(
+      bytes(1, 2, 3, 4),
+    );
+    const entries = await readdir(join(dir, "data"));
+    expect(entries.some((name) => name.endsWith(".tmp"))).toBe(false);
+  });
 });
 
 describe("MemoryBucket copies bytes", () => {
@@ -242,11 +253,35 @@ describe("NoopUploadManager", () => {
     await expect(m.delete("a")).resolves.toBeUndefined();
   });
 
-  it("lists nothing and signs to an empty URL", async () => {
+  it("lists nothing and rejects signing (a noop can't mint a real URL)", async () => {
     const m: Attributer & Lister & URLSigner = new NoopUploadManager();
     expect(await listAll(m, "")).toEqual([]);
-    expect(await m.signedURL("a")).toBe("");
+    await expect(m.signedURL("a")).rejects.toBeInstanceOf(SigningUnsupportedError);
     expect((await m.attributes("a")).size).toBe(0);
+  });
+});
+
+describe("maxSizeBytes backstop", () => {
+  it("rejects a byte body over the limit before writing", async () => {
+    const m = provideUploads({ bucketName: "b", provider: "memory", maxSizeBytes: 4 });
+    await expect(m.save("a", bytes(1, 2, 3, 4, 5))).rejects.toMatchObject({
+      code: "uploads/file-too-large",
+    });
+    // a body within the limit still writes.
+    await expect(m.save("a", bytes(1, 2, 3, 4))).resolves.toBeUndefined();
+  });
+
+  it("rejects a stream body once it crosses the limit", async () => {
+    const m = provideUploads({ bucketName: "b", provider: "memory", maxSizeBytes: 4 });
+    const oversized = bytesToStream(bytes(1, 2, 3, 4, 5, 6));
+    await expect(m.save("s", oversized)).rejects.toMatchObject({
+      code: "uploads/file-too-large",
+    });
+  });
+
+  it("is disabled by default (maxSizeBytes 0)", async () => {
+    const m = provideUploads({ bucketName: "b", provider: "memory" });
+    await expect(m.save("a", bytes(1, 2, 3, 4, 5, 6, 7, 8))).resolves.toBeUndefined();
   });
 });
 

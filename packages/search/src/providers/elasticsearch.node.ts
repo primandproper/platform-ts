@@ -9,7 +9,10 @@ import {
 } from "@primandproper/observability";
 
 import {
+  type BulkDocument,
+  type BulkIndexManager,
   CircuitBrokenError,
+  DEFAULT_SEARCH_LIMIT,
   EmptyQueryError,
   ID_KEY,
   INDEX_NAME_KEY,
@@ -52,7 +55,7 @@ interface SearchResponseBody<T> {
  * (the Go version built an empty `bool/should` that matched nothing), and `wipe` throws an
  * explicit unimplemented error (as the Go version also did).
  */
-export class ElasticsearchDocumentIndex<T> implements DocumentIndex<T> {
+export class ElasticsearchDocumentIndex<T> implements DocumentIndex<T>, BulkIndexManager {
   readonly #client: Client;
   readonly #indexName: string;
   readonly #indexOperationTimeoutMs: number | undefined;
@@ -70,7 +73,9 @@ export class ElasticsearchDocumentIndex<T> implements DocumentIndex<T> {
     circuitBreaker: CircuitBreaker,
     deps: ObservabilityDeps = {},
   ) {
-    this.#indexName = options.indexName;
+    // Elasticsearch lowercases index names; normalize once so exists/create/index/search/delete
+    // all address the same index (they previously mixed the raw and lowercased name).
+    this.#indexName = options.indexName.toLowerCase();
     this.#indexOperationTimeoutMs = options.indexOperationTimeoutMs;
     this.#cb = circuitBreaker;
     this.#observer = deps.observer ?? makeObserver(`search_${options.indexName}`, deps);
@@ -120,7 +125,7 @@ export class ElasticsearchDocumentIndex<T> implements DocumentIndex<T> {
       try {
         const exists = await this.#client.indices.exists({ index: this.#indexName });
         if (!exists) {
-          await this.#client.indices.create({ index: this.#indexName.toLowerCase() });
+          await this.#client.indices.create({ index: this.#indexName });
         }
         this.#cb.succeeded();
       } catch (error) {
@@ -156,6 +161,45 @@ export class ElasticsearchDocumentIndex<T> implements DocumentIndex<T> {
     });
   }
 
+  indexMany(documents: readonly BulkDocument[]): Promise<void> {
+    return this.#observer.run("IndexMany", async (op) => {
+      if (documents.length === 0) {
+        return;
+      }
+      if (!this.#cb.canProceed()) {
+        throw new CircuitBrokenError();
+      }
+
+      op.set(INDEX_NAME_KEY, this.#indexName).set(LENGTH_KEY, documents.length);
+      this.#logger.debug("bulk adding to index");
+
+      // One `_bulk` round trip: an action line + a source line per document.
+      const operations = documents.flatMap(({ id, value }) => [
+        { index: { _index: this.#indexName, _id: id } },
+        value as Record<string, unknown>,
+      ]);
+
+      try {
+        const response = await this.#client.bulk({
+          operations,
+          ...(this.#indexOperationTimeoutMs !== undefined
+            ? { timeout: `${String(this.#indexOperationTimeoutMs)}ms` }
+            : {}),
+        });
+        if (response.errors) {
+          throw new PlatformError(
+            "search/bulk-failed",
+            "elasticsearch bulk had item errors",
+          );
+        }
+        this.#cb.succeeded();
+      } catch (error) {
+        this.#cb.failed();
+        throw wrap("bulk indexing values", error);
+      }
+    });
+  }
+
   search(query: string): Promise<T[]> {
     return this.#observer.run("Search", async (op) => {
       if (!this.#cb.canProceed()) {
@@ -173,6 +217,8 @@ export class ElasticsearchDocumentIndex<T> implements DocumentIndex<T> {
         body = await this.#client.search<T>({
           index: this.#indexName,
           query: { query_string: { query } },
+          // Cap the result set explicitly; ES otherwise silently returns its own default of 10.
+          size: DEFAULT_SEARCH_LIMIT,
         });
         this.#cb.succeeded();
       } catch (error) {
@@ -204,6 +250,13 @@ export class ElasticsearchDocumentIndex<T> implements DocumentIndex<T> {
         await this.#client.delete({ index: this.#indexName, id });
         this.#cb.succeeded();
       } catch (error) {
+        // Deleting an unknown id is a no-op, not a failure — the server responded, so this must
+        // not trip the breaker (matches the Typesense sibling's ObjectNotFound handling).
+        if (isElasticNotFound(error)) {
+          this.#cb.succeeded();
+          this.#logger.debug("delete of missing document is a no-op");
+          return;
+        }
         this.#cb.failed();
         throw wrap("deleting from elasticsearch", error);
       }
@@ -235,4 +288,17 @@ function buildClientOptions(options: ElasticsearchDocumentIndexOptions): ClientO
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Whether an error from the Elasticsearch client represents a 404 (index or document not found).
+ * The client raises a `ResponseError` carrying the HTTP status on `statusCode` (and `meta.statusCode`).
+ */
+export function isElasticNotFound(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const statusCode = (error as { statusCode?: unknown }).statusCode;
+  const metaStatusCode = (error as { meta?: { statusCode?: unknown } }).meta?.statusCode;
+  return statusCode === 404 || metaStatusCode === 404;
 }

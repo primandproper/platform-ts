@@ -60,6 +60,43 @@ export function toBytes(body: BlobBody): Promise<Uint8Array> {
   return body instanceof Uint8Array ? Promise.resolve(body) : collectStream(body);
 }
 
+/**
+ * Wraps a byte stream so it errors once the cumulative byte count exceeds `maxBytes`, without
+ * buffering the whole payload. `onExceeded` supplies the error to fail the stream with — the
+ * caller owns the error type. Bytes up to the limit still flow to the consumer before the error.
+ */
+export function limitStream(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+  onExceeded: (limit: number) => Error,
+): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  let total = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) {
+        controller.close();
+        reader.releaseLock();
+        return;
+      }
+      total += value.length;
+      if (total > maxBytes) {
+        const err = onExceeded(maxBytes);
+        controller.error(err);
+        await reader.cancel(err);
+        reader.releaseLock();
+        return;
+      }
+      controller.enqueue(value);
+    },
+    async cancel(reason) {
+      await reader.cancel(reason);
+      reader.releaseLock();
+    },
+  });
+}
+
 /** Discards a body's bytes — used by the noop manager to honor the read of a passed stream. */
 export async function drain(body: BlobBody): Promise<void> {
   if (body instanceof Uint8Array) {

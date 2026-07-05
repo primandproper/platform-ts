@@ -1,7 +1,11 @@
+import type { MeterProvider } from "@primandproper/observability";
 import { describe, expect, it, vi } from "vitest";
+
+import { parseAddress } from "./providers/redis.node.js";
 
 import {
   type ConsumerProvider,
+  ErrConsumerHandlerMismatch,
   ErrEmptyTopicName,
   KafkaConsumerProvider,
   KafkaPublisherProvider,
@@ -86,6 +90,95 @@ describe("MemoryBroker round-trip", () => {
   });
 });
 
+/** A meter provider that tallies counter `add`s by instrument name. */
+function recordingMeter(): { provider: MeterProvider; counts: Record<string, number> } {
+  const counts: Record<string, number> = {};
+  const counter = (name: string) => ({
+    add: (value: number) => {
+      counts[name] = (counts[name] ?? 0) + value;
+    },
+  });
+  const meter = {
+    createCounter: (name: string) => counter(name),
+    createUpDownCounter: (name: string) => counter(name),
+    createHistogram: () => ({ record: () => undefined }),
+    createGauge: () => ({ record: () => undefined }),
+  };
+  return {
+    provider: { getMeter: () => meter } as unknown as MeterProvider,
+    counts,
+  };
+}
+
+describe("consumer handler cache (MQ-2)", () => {
+  it("returns the same consumer for the same topic+handler", async () => {
+    const consumers = new MemoryConsumerProvider(new MemoryBroker());
+    const handler = (): Promise<void> => Promise.resolve();
+    const a = await consumers.provideConsumer("topic", handler);
+    const b = await consumers.provideConsumer("topic", handler);
+    expect(a).toBe(b);
+  });
+
+  it("rejects a second consumer for the same topic with a different handler", async () => {
+    const consumers = new MemoryConsumerProvider(new MemoryBroker());
+    await consumers.provideConsumer("topic", () => Promise.resolve());
+    await expect(
+      consumers.provideConsumer("topic", () => Promise.resolve()),
+    ).rejects.toBe(ErrConsumerHandlerMismatch);
+  });
+});
+
+describe("consumer metrics (MQ-3)", () => {
+  it("counts consumed only after a successful handler and errors on failure", async () => {
+    const broker = new MemoryBroker();
+    const { provider, counts } = recordingMeter();
+    const consumers = new MemoryConsumerProvider(broker, { metrics: provider });
+    const publishers = new MemoryPublisherProvider(broker);
+
+    let calls = 0;
+    const consumer = await consumers.provideConsumer("topic", () => {
+      calls += 1;
+      // Fail the first message, succeed the second.
+      return calls === 1 ? Promise.reject(new Error("boom")) : Promise.resolve();
+    });
+    const stop = new AbortController();
+    void consumer.consume(stop.signal, () => undefined);
+
+    const publisher = await publishers.providePublisher("topic");
+    await publisher.publish({ n: 1 });
+    await publisher.publish({ n: 2 });
+    await tick();
+
+    expect(counts.topic_consumed).toBe(1);
+    expect(counts.topic_consume_errors).toBe(1);
+    stop.abort();
+  });
+});
+
+describe("parseAddress (MQ-4)", () => {
+  it("parses IPv4 host:port and bare host", () => {
+    expect(parseAddress("localhost:6379")).toEqual({ host: "localhost", port: 6379 });
+    expect(parseAddress("redis.example.com")).toEqual({
+      host: "redis.example.com",
+      port: 6379,
+    });
+  });
+
+  it("parses bracketed IPv6 with and without a port", () => {
+    expect(parseAddress("[::1]:6380")).toEqual({ host: "::1", port: 6380 });
+    expect(parseAddress("[2001:db8::1]:6379")).toEqual({
+      host: "2001:db8::1",
+      port: 6379,
+    });
+    expect(parseAddress("[::1]")).toEqual({ host: "::1", port: 6379 });
+  });
+
+  it("treats a bare IPv6 literal as the host with the default port", () => {
+    expect(parseAddress("::1")).toEqual({ host: "::1", port: 6379 });
+    expect(parseAddress("2001:db8::1")).toEqual({ host: "2001:db8::1", port: 6379 });
+  });
+});
+
 describe("empty topic", () => {
   it("rejects providePublisher with ErrEmptyTopicName", async () => {
     await expect(new MemoryPublisherProvider().providePublisher("")).rejects.toBe(
@@ -109,9 +202,7 @@ describe("noop providers", () => {
     expect(() => {
       publisher.publishAsync({ n: 1 });
     }).not.toThrow();
-    expect(() => {
-      provider.close();
-    }).not.toThrow();
+    await expect(provider.close()).resolves.toBeUndefined();
   });
 
   it("consume resolves once aborted", async () => {
@@ -250,6 +341,7 @@ describe.skipIf(!REDIS_ADDR)("Redis PUB/SUB (live)", () => {
     await publisher.publish({ hello: "redis" });
 
     expect(await received).toEqual({ hello: "redis" });
-    publishers.close();
+    await publishers.close();
+    await consumers.close();
   });
 });

@@ -25,4 +25,8 @@ export class NoopRateLimiter implements RateLimiter {
   reset(): Promise<void> {
     return Promise.resolve();
   }
+
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
 }

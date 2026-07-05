@@ -1,6 +1,12 @@
+import {
+  makeRecordingObserver,
+  type MeterProvider,
+  type ObservabilityDeps,
+} from "@primandproper/observability";
 import { describe, expect, it, vi } from "vitest";
 
 import { EmptyEmailBodyError, type Email, type EmailMessage } from "./email.js";
+import type { FetchLike } from "./providers/http.js";
 import { MailgunEmail } from "./providers/mailgun.js";
 import { MailjetEmail } from "./providers/mailjet.js";
 import { MemoryEmail } from "./providers/memory.js";
@@ -11,7 +17,7 @@ import {
   type PostmarkMessage,
   type PostmarkSendResponse,
 } from "./providers/postmark.node.js";
-import { ResendEmail, type FetchLike } from "./providers/resend.js";
+import { ResendEmail } from "./providers/resend.js";
 import { SendgridEmail } from "./providers/sendgrid.js";
 
 import { provideEmail } from "./index.js";
@@ -83,6 +89,23 @@ describe("MemoryEmail", () => {
     expect(email.sent[0]?.to).toBe("to@example.com");
   });
 });
+
+/** A MeterProvider that records every counter `add`, so tests can assert send/error counters. */
+function countingMeter(): { deps: ObservabilityDeps; counts: Map<string, number> } {
+  const counts = new Map<string, number>();
+  const meter = {
+    createCounter: (name: string) => ({
+      add: (value: number) => counts.set(name, (counts.get(name) ?? 0) + value),
+    }),
+    // makeObserver auto-mints an operation-duration histogram; the fake meter must provide
+    // it even though these tests only assert on the counters.
+    createHistogram: () => ({ record: () => undefined }),
+    createUpDownCounter: () => ({ add: () => undefined }),
+    createGauge: () => ({ record: () => undefined }),
+  };
+  const provider = { getMeter: () => meter } as unknown as MeterProvider;
+  return { deps: { metrics: provider }, counts };
+}
 
 /** Builds a fake `fetch` that records its call and returns the given response. */
 function fakeFetch(response: Response): {
@@ -158,6 +181,26 @@ describe("ResendEmail", () => {
     const email = new ResendEmail({ apiKey: "k", fetch });
 
     expect(await email.send(sample)).toStrictEqual({});
+  });
+
+  it("does not throw on a 2xx with an empty or non-JSON body (EM-1)", async () => {
+    const empty = fakeFetch(new Response("", { status: 200 }));
+    await expect(
+      new ResendEmail({ apiKey: "k", fetch: empty.fetch }).send(sample),
+    ).resolves.toStrictEqual({});
+
+    const nonJson = fakeFetch(new Response("OK", { status: 200 }));
+    await expect(
+      new ResendEmail({ apiKey: "k", fetch: nonJson.fetch }).send(sample),
+    ).resolves.toStrictEqual({});
+  });
+
+  it("pings a real authenticated endpoint (GET /domains), not OPTIONS /emails (EM-1)", async () => {
+    const { fetch, calls } = fakeFetch(jsonResponse({ data: [] }));
+    await new ResendEmail({ apiKey: "k", fetch }).ping();
+
+    expect(calls[0]?.url).toBe("https://api.resend.com/domains");
+    expect(calls[0]?.init.method).toBe("GET");
   });
 
   it("throws with status and body on a non-ok response", async () => {
@@ -365,6 +408,184 @@ describe("MailjetEmail", () => {
       sample,
     );
     expect(result.id).toBe("99");
+  });
+
+  it("does not throw on a 2xx with an empty or non-JSON body (EM-1)", async () => {
+    const { fetch } = fakeFetch(new Response("", { status: 200 }));
+    await expect(
+      new MailjetEmail({ apiKey: "a", secretKey: "s", fetch }).send(sample),
+    ).resolves.toStrictEqual({});
+  });
+});
+
+describe("email instrumentation", () => {
+  it("counts the send and records the recipient domain and request id on success", async () => {
+    const { deps, counts } = countingMeter();
+    const observer = makeRecordingObserver();
+    const { fetch } = fakeFetch(jsonResponse({ id: "re_ok" }));
+    const email = new ResendEmail({ apiKey: "k", fetch }, { ...deps, observer });
+
+    await email.send(sample);
+
+    expect(counts.get("email_sends")).toBe(1);
+    expect(observer.observations).toContainEqual(
+      expect.objectContaining({ key: "recipientDomain", value: "example.com" }),
+    );
+    expect(observer.observations).toContainEqual(
+      expect.objectContaining({ key: "requestId", value: "re_ok" }),
+    );
+  });
+
+  it("counts the error and logs the recipient domain and request id on failure", async () => {
+    const { deps, counts } = countingMeter();
+    const observer = makeRecordingObserver();
+    const { fetch } = fakeFetch(
+      new Response("boom", { status: 500, headers: { "x-request-id": "req_err" } }),
+    );
+    const email = new ResendEmail({ apiKey: "k", fetch }, { ...deps, observer });
+
+    await expect(email.send(sample)).rejects.toThrow(/500.*boom/);
+
+    expect(counts.get("email_errors")).toBe(1);
+    expect(observer.observations).toContainEqual(
+      expect.objectContaining({ key: "recipientDomain", value: "example.com" }),
+    );
+    expect(observer.observations).toContainEqual(
+      expect.objectContaining({ key: "requestId", value: "req_err" }),
+    );
+    expect(observer.errors.map((e) => e.description)).toContain(
+      "resend send failed with status 500",
+    );
+  });
+
+  it("passes the cause to the logger when the postmark SDK throws", async () => {
+    const { deps, counts } = countingMeter();
+    const observer = makeRecordingObserver();
+    const client: PostmarkClientLike = {
+      sendEmail() {
+        return Promise.reject(new Error("network down"));
+      },
+      getServer() {
+        return Promise.resolve({});
+      },
+    };
+    const email = new PostmarkEmail(
+      { serverToken: "tok", client },
+      { ...deps, observer },
+    );
+
+    await expect(email.send(sample)).rejects.toThrow(/network down/);
+
+    expect(counts.get("email_errors")).toBe(1);
+    const recorded = observer.errors[0];
+    expect(recorded?.description).toBe("postmark send failed");
+    expect((recorded?.err as Error).message).toMatch(/network down/);
+    expect(observer.observations).toContainEqual(
+      expect.objectContaining({ key: "recipientDomain", value: "example.com" }),
+    );
+  });
+});
+
+describe("email resilience (timeout + retry)", () => {
+  it("passes an abort signal into the send fetch by default (timeout on)", async () => {
+    const { fetch, calls } = fakeFetch(jsonResponse({ id: "re_ok" }));
+    const email = new ResendEmail({ apiKey: "k", fetch });
+
+    await email.send(sample);
+
+    const signal = calls[0]?.init.signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("sends no signal when the timeout is disabled", async () => {
+    const { fetch, calls } = fakeFetch(jsonResponse({ id: "re_ok" }));
+    const email = new ResendEmail({ apiKey: "k", timeoutMs: 0, fetch });
+
+    await email.send(sample);
+
+    expect(calls[0]?.init.signal ?? undefined).toBeUndefined();
+  });
+
+  it("does not retry by default", async () => {
+    let attempts = 0;
+    const fetch: FetchLike = () => {
+      attempts += 1;
+      return Promise.resolve(new Response("boom", { status: 503 }));
+    };
+    const email = new ResendEmail({ apiKey: "k", fetch });
+
+    await expect(email.send(sample)).rejects.toThrow(/503/);
+    expect(attempts).toBe(1);
+  });
+
+  it("retries a 503 when a retry policy is configured, then surfaces the final response", async () => {
+    let attempts = 0;
+    const fetch: FetchLike = () => {
+      attempts += 1;
+      return Promise.resolve(new Response("still down", { status: 503 }));
+    };
+    const email = new ResendEmail({
+      apiKey: "k",
+      retry: {
+        maxAttempts: 3,
+        baseDelayMs: 0,
+        maxDelayMs: 0,
+        jitter: 0,
+        maxElapsedMs: 0,
+      },
+      fetch,
+    });
+
+    await expect(email.send(sample)).rejects.toThrow(/503.*still down/);
+    // Three attempts, then the final 503 surfaces through the provider's own error path.
+    expect(attempts).toBe(3);
+  });
+
+  it("does not retry a 4xx even when a retry policy is configured", async () => {
+    let attempts = 0;
+    const fetch: FetchLike = () => {
+      attempts += 1;
+      return Promise.resolve(new Response("bad request", { status: 400 }));
+    };
+    const email = new ResendEmail({
+      apiKey: "k",
+      retry: {
+        maxAttempts: 3,
+        baseDelayMs: 0,
+        maxDelayMs: 0,
+        jitter: 0,
+        maxElapsedMs: 0,
+      },
+      fetch,
+    });
+
+    await expect(email.send(sample)).rejects.toThrow(/400/);
+    expect(attempts).toBe(1);
+  });
+
+  it("retries a transient network error, then succeeds", async () => {
+    let attempts = 0;
+    const fetch: FetchLike = () => {
+      attempts += 1;
+      return attempts < 2
+        ? Promise.reject(new Error("ECONNRESET"))
+        : Promise.resolve(jsonResponse({ id: "re_ok" }));
+    };
+    const email = new ResendEmail({
+      apiKey: "k",
+      retry: {
+        maxAttempts: 3,
+        baseDelayMs: 0,
+        maxDelayMs: 0,
+        jitter: 0,
+        maxElapsedMs: 0,
+      },
+      fetch,
+    });
+
+    const result = await email.send(sample);
+    expect(result.id).toBe("re_ok");
+    expect(attempts).toBe(2);
   });
 });
 

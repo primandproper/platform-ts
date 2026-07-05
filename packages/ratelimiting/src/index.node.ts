@@ -32,6 +32,13 @@ export function provideRateLimiter(
           keyPrefix: cfg.redis.keyPrefix,
           limit: cfg.limit,
           windowMs: cfg.windowMs,
+          failOpen: cfg.redis.failOpen,
+          ...(cfg.redis.commandTimeoutMs !== undefined
+            ? { commandTimeoutMs: cfg.redis.commandTimeoutMs }
+            : {}),
+          ...(cfg.redis.connectTimeoutMs !== undefined
+            ? { connectTimeoutMs: cfg.redis.connectTimeoutMs }
+            : {}),
         },
         deps,
       );

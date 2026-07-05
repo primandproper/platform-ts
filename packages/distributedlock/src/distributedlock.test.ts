@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 
+import { makeRecordingObserver } from "@primandproper/observability";
 import { describe, expect, it } from "vitest";
 
 import { MemoryDistributedLock } from "./providers/memory.js";
 import { NoopDistributedLock } from "./providers/noop.js";
+import { PostgresDistributedLock } from "./providers/postgres.node.js";
 import { RedisDistributedLock } from "./providers/redis.node.js";
 
 import { provideDistributedLock, type DistributedLock } from "./index.js";
@@ -39,18 +41,22 @@ function conformance(name: string, make: () => DistributedLock): void {
       expect(lock?.key).toBe("job");
     });
 
-    it("releases without throwing", async () => {
+    it("release of an owned lease reports true", async () => {
       const lock = await make().acquire("job");
-      await expect(lock?.release()).resolves.toBeUndefined();
+      await expect(lock?.release()).resolves.toBe(true);
     });
 
-    it("refreshes without throwing", async () => {
+    it("refresh of an owned lease reports true", async () => {
       const lock = await make().acquire("job");
-      await expect(lock?.refresh()).resolves.toBeUndefined();
+      await expect(lock?.refresh()).resolves.toBe(true);
     });
 
     it("pings without throwing", async () => {
       await expect(make().ping()).resolves.toBeUndefined();
+    });
+
+    it("closes without throwing", async () => {
+      await expect(make().close()).resolves.toBeUndefined();
     });
   });
 }
@@ -92,7 +98,7 @@ describe.skipIf(!REDIS_URL)("RedisDistributedLock (live)", () => {
     const fresh = await dl.acquire("job", { ttlMs: 5_000 });
     expect(fresh).toBeDefined();
 
-    await stale?.release(); // must not free fresh's lease
+    expect(await stale?.release()).toBe(false); // reports the loss; must not free fresh's lease
     expect(await dl.acquire("job", { ttlMs: 5_000 })).toBeUndefined();
   });
 });
@@ -154,7 +160,7 @@ describe("MemoryDistributedLock", () => {
     const fresh = await dl.acquire("job", { ttlMs: 1_000 });
     expect(fresh).toBeDefined();
 
-    await stale?.release(); // must not free fresh's lease
+    expect(await stale?.release()).toBe(false); // reports the loss; must not free fresh's lease
     expect(await dl.acquire("job")).toBeUndefined();
   });
 
@@ -167,10 +173,106 @@ describe("MemoryDistributedLock", () => {
     const fresh = await dl.acquire("job", { ttlMs: 1_000 });
     expect(fresh).toBeDefined();
 
-    await stale?.refresh(10_000); // must not touch fresh's lease
+    expect(await stale?.refresh(10_000)).toBe(false); // reports the loss; must not touch fresh's lease
 
     clock.advance(1_000); // fresh's own lease lapses
     expect(await dl.acquire("job")).toBeDefined();
+  });
+
+  // DL-1: refresh must not revive a lease that lapsed on the clock, even with no takeover.
+  it("refresh reports loss and does not revive an expired-but-untaken lease", async () => {
+    const clock = fakeClock();
+    const dl = new MemoryDistributedLock({}, { now: clock.now });
+
+    const lock = await dl.acquire("job", { ttlMs: 1_000 });
+    expect(lock).toBeDefined();
+
+    clock.advance(1_000); // lease lapses; nobody else has taken it
+    expect(await lock?.refresh()).toBe(false);
+
+    // The key is free (refresh did not resurrect the dead lease), so a fresh acquire succeeds.
+    expect(await dl.acquire("job")).toBeDefined();
+  });
+
+  // DL-2: an abandoned expired lease must not linger in the map forever — a later acquire sweeps it.
+  it("sweeps abandoned expired leases on a subsequent acquire", async () => {
+    const clock = fakeClock();
+    const observer = makeRecordingObserver();
+    const dl = new MemoryDistributedLock({}, { now: clock.now, observer });
+
+    // Acquire and abandon a key (never released), then let its lease lapse.
+    expect(await dl.acquire("abandoned", { ttlMs: 1_000 })).toBeDefined();
+    clock.advance(1_000);
+
+    // Acquiring an unrelated key triggers the opportunistic sweep, dropping the dead "abandoned" row.
+    observer.reset();
+    expect(await dl.acquire("other", { ttlMs: 1_000 })).toBeDefined();
+    expect(observer.data()["leases.swept"]).toBe(1);
+  });
+});
+
+describe("observability (INST-2)", () => {
+  it("runs acquire/release/refresh inside the injected observer, keyed by the lock key", async () => {
+    const observer = makeRecordingObserver();
+    const dl = new MemoryDistributedLock({}, { observer });
+
+    const lock = await dl.acquire("job");
+    expect(lock).toBeDefined();
+    await lock?.refresh();
+    await lock?.release();
+
+    // The factory-style spans are named and each carries the key on both pillars.
+    expect(observer.runs.map((r) => r.operation)).toEqual([
+      "acquire",
+      "refresh",
+      "release",
+    ]);
+    for (const op of ["acquire", "refresh", "release"]) {
+      const keyObs = observer.forOperation(op).find((o) => o.key === "key");
+      expect(keyObs, `${op} must name the key`).toBeDefined();
+      expect(keyObs?.value).toBe("job");
+      expect(keyObs?.pillar).toBe("both"); // fans to span AND log
+    }
+  });
+
+  it("names the key when acquire is contended", async () => {
+    const observer = makeRecordingObserver();
+    const dl = new MemoryDistributedLock({}, { observer });
+
+    expect(await dl.acquire("job")).toBeDefined();
+    expect(await dl.acquire("job")).toBeUndefined(); // contended
+
+    const contendedAcquire = observer
+      .forOperation("acquire")
+      .filter((o) => o.key === "key" && o.value === "job");
+    expect(contendedAcquire.length).toBe(2); // both attempts named the key
+  });
+
+  it("names the key when release/refresh find the lease lost", async () => {
+    const clock = fakeClock();
+    const observer = makeRecordingObserver();
+    const dl = new MemoryDistributedLock({}, { now: clock.now, observer });
+
+    const stale = await dl.acquire("job", { ttlMs: 1_000 });
+    clock.advance(1_000); // lease lapses
+    await dl.acquire("job", { ttlMs: 1_000 }); // taken over
+
+    expect(await stale?.release()).toBe(false);
+    expect(await stale?.refresh()).toBe(false);
+
+    for (const op of ["release", "refresh"]) {
+      const keyObs = observer.forOperation(op).find((o) => o.key === "key");
+      expect(keyObs?.value).toBe("job");
+    }
+  });
+
+  it("provideDistributedLock threads an injected observer to the provider", async () => {
+    const observer = makeRecordingObserver();
+    const dl = provideDistributedLock({ provider: "memory" }, { observer });
+
+    await dl.acquire("job");
+
+    expect(observer.forOperation("acquire").some((o) => o.key === "key")).toBe(true);
   });
 });
 
@@ -216,5 +318,27 @@ describe("provideDistributedLock", () => {
 
     clock.advance(1_000);
     expect(await dl.acquire("job")).toBeDefined();
+  });
+});
+
+// DL-2: the postgres provider reclaims abandoned expired rows via a maintenance call. (The full
+// acquire/release lifecycle against a live postgres is exercised separately, behind an env flag.)
+describe("PostgresDistributedLock.cleanupExpired (DL-2)", () => {
+  it("deletes rows whose lease has lapsed and returns the count", async () => {
+    const queries: string[] = [];
+    const pool = {
+      query: (text: string) => {
+        queries.push(text);
+        return Promise.resolve({ rows: [], rowCount: 3 });
+      },
+      end: () => Promise.resolve(),
+    };
+    const dl = new PostgresDistributedLock({ pool });
+
+    await expect(dl.cleanupExpired()).resolves.toBe(3);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toMatch(
+      /DELETE FROM distributed_locks WHERE expires_at < now\(\)/,
+    );
   });
 });

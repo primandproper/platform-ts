@@ -15,12 +15,29 @@ const BaseRateLimitConfigSchema = z.object({
 export const RedisConfigSchema = z.object({
   url: z.string().url(),
   keyPrefix: z.string().default(""),
+  /** Reject a command that outlives this many ms — the fail-fast timeout knob. Off by default. */
+  commandTimeoutMs: z.number().int().positive().optional(),
+  /** TCP connect timeout in ms. Defaults to ioredis's 10s. */
+  connectTimeoutMs: z.number().int().positive().optional(),
+  /**
+   * Behaviour when Redis is unreachable. `false` (default) fails closed — deny while Redis is down,
+   * so an outage can't lift the limit. `true` fails open — keep admitting, trading the guarantee for
+   * availability. See {@link RedisRateLimiterOptions.failOpen}.
+   */
+  failOpen: z.boolean().default(false),
 });
 
 export type RedisConfig = z.infer<typeof RedisConfigSchema>;
 
 /** Node config. Replaces the Go `env:`-tagged struct + ozzo `ValidateWithContext`. */
 export const NodeRateLimitConfigSchema = BaseRateLimitConfigSchema.extend({
+  /**
+   * Which limiter backend to use. NOTE: the default, `memory`, keeps counters **per process**. In a
+   * multi-instance deployment (multiple replicas / workers behind a load balancer) each instance
+   * then enforces the limit independently, so the effective ceiling is roughly `limit × instances`
+   * rather than `limit`. Use `redis` for a shared, cluster-wide limit; `memory` is intended for
+   * single-instance services, local development, and tests.
+   */
   provider: z.enum(["memory", "redis", "noop"]).default("memory"),
   redis: RedisConfigSchema.optional(),
 }).superRefine((cfg, ctx) => {

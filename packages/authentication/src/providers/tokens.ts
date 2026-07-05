@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 
+import { InvalidTokenLengthError } from "../errors.js";
 import type { TokenGenerator } from "../tokens.js";
 
 export interface RandomTokenGeneratorOptions {
@@ -16,6 +17,9 @@ export class RandomTokenGenerator implements TokenGenerator {
   }
 
   generate(byteLength: number = this.#byteLength): string {
+    if (!Number.isInteger(byteLength) || byteLength <= 0) {
+      throw new InvalidTokenLengthError(byteLength);
+    }
     return randomBytes(byteLength).toString("base64url");
   }
 }

@@ -1,6 +1,8 @@
 import {
+  makeMetrics,
   makeObserver,
   type Logger,
+  type Metrics,
   type ObservabilityDeps,
   type Observer,
 } from "@primandproper/observability";
@@ -9,6 +11,8 @@ import type { FlagDefinition, FlagRule, FlagTable } from "../config.js";
 import type { EvaluationContext, FlagValue } from "../featureflags.js";
 
 import { BaseFeatureFlagManager } from "./base.js";
+
+type Counter = ReturnType<Metrics["counter"]>;
 
 const o11yName = "featureflags";
 
@@ -28,12 +32,20 @@ export class StaticFeatureFlagManager extends BaseFeatureFlagManager {
   readonly #flags: FlagTable;
   readonly #observer: Observer;
   readonly #logger: Logger;
+  readonly #errors: Counter;
 
   constructor(options: StaticFeatureFlagsOptions = {}, deps: ObservabilityDeps = {}) {
     super();
     this.#flags = options.flags ?? {};
     this.#observer = deps.observer ?? makeObserver(o11yName, deps);
     this.#logger = this.#observer.logger();
+    this.#errors = makeMetrics(o11yName, deps.metrics).counter(
+      "featureflags.evaluation.errors",
+      {
+        description:
+          "Feature-flag evaluations that fell back to the default, by error code.",
+      },
+    );
   }
 
   override evaluate<T extends FlagValue>(
@@ -42,10 +54,22 @@ export class StaticFeatureFlagManager extends BaseFeatureFlagManager {
     context?: EvaluationContext,
   ): Promise<T> {
     if (!Object.prototype.hasOwnProperty.call(this.#flags, key)) {
-      this.#logger.debug("feature flag not found");
+      this.#logger.debug("feature flag not found", { key });
       return Promise.resolve(defaultValue);
     }
     const resolved = resolve(this.#flags[key], context);
+    // Guard the cast: a flag whose stored value's type doesn't match the requested type would
+    // otherwise be returned as the wrong T. Fall back to the default (mirrors OpenFeature's
+    // TYPE_MISMATCH handling from FLAG-1) and surface it via the errors counter.
+    if (!sameJsonType(resolved, defaultValue)) {
+      this.#errors.add(1, { error_code: "TYPE_MISMATCH" });
+      this.#logger.warn("feature flag type mismatch, returning default", {
+        key,
+        expected: jsonType(defaultValue),
+        actual: jsonType(resolved),
+      });
+      return Promise.resolve(defaultValue);
+    }
     return Promise.resolve(resolved as T);
   }
 
@@ -76,6 +100,18 @@ function resolve(
     }
   }
   return definition.value;
+}
+
+/** The coarse JSON type of a flag value, distinguishing `null`, arrays, and plain objects. */
+function jsonType(value: FlagValue): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+/** True when two flag values share the same coarse JSON type (used to guard the return cast). */
+function sameJsonType(a: FlagValue, b: FlagValue): boolean {
+  return jsonType(a) === jsonType(b);
 }
 
 /** A rule matches when every attribute it constrains equals the context's attribute. */

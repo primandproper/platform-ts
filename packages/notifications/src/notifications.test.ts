@@ -11,7 +11,7 @@ import {
   type ApnsClient,
   type AsyncNotifier,
   type ChannelPublisher,
-  ErrPlatformNotSupported,
+  PLATFORM_NOT_SUPPORTED_MESSAGE,
   FcmSender,
   type FcmClient,
   MultiPlatformPushSender,
@@ -199,11 +199,11 @@ describe("MultiPlatformPushSender", () => {
     expect(fcmSend).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects with ErrPlatformNotSupported when the platform sender is absent", async () => {
+  it("rejects when the platform sender is absent", async () => {
     const { sender } = build({ fcm: true });
     await expect(
       sender.sendPush("ios", iosToken, { title: "T", body: "B" }),
-    ).rejects.toBe(ErrPlatformNotSupported);
+    ).rejects.toThrow(PLATFORM_NOT_SUPPORTED_MESSAGE);
   });
 
   it("rejects an unknown platform", async () => {
@@ -211,6 +211,27 @@ describe("MultiPlatformPushSender", () => {
     await expect(
       sender.sendPush("blackberry", "token", { title: "T", body: "B" }),
     ).rejects.toThrow(/unknown platform/);
+  });
+
+  // LC-7: close() must release both platform clients rather than leaking them on shutdown.
+  it("closes both platform senders on close", async () => {
+    const apnsClose = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    const fcmClose = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    const apnsSender = new ApnsSender(
+      { send: vi.fn(), close: apnsClose },
+      "com.example.app",
+    );
+    const fcmSender = new FcmSender({ send: vi.fn(), close: fcmClose });
+
+    await new MultiPlatformPushSender(apnsSender, fcmSender).close();
+
+    expect(apnsClose).toHaveBeenCalledOnce();
+    expect(fcmClose).toHaveBeenCalledOnce();
+  });
+
+  it("close is a no-op when a platform sender is absent", async () => {
+    const { sender } = build({ apns: true });
+    await expect(sender.close()).resolves.toBeUndefined();
   });
 });
 
@@ -223,11 +244,12 @@ describe("noop providers", () => {
     }).not.toThrow();
   });
 
-  it("NoopPushNotificationSender sends without throwing", async () => {
+  it("NoopPushNotificationSender sends and closes without throwing", async () => {
     const sender: PushNotificationSender = new NoopPushNotificationSender();
     await expect(
       sender.sendPush("ios", "token", { title: "T", body: "B" }),
     ).resolves.toBeUndefined();
+    await expect(sender.close()).resolves.toBeUndefined();
   });
 });
 
@@ -272,5 +294,19 @@ describe("providePushSender", () => {
     expect(providePushSender({ provider: "apns_fcm" })).toBeInstanceOf(
       NoopPushNotificationSender,
     );
+  });
+
+  it("counts a platform init failure instead of failing silently", () => {
+    // A missing service-account file makes firebase-admin's cert() throw at construction, which
+    // is exactly the "iOS/Android push silently disabled" case INST-3 makes visible.
+    const { deps, counts } = countingMeter();
+
+    const sender = providePushSender(
+      { provider: "apns_fcm", fcm: { credentialsPath: "/does/not/exist.json" } },
+      deps,
+    );
+
+    expect(counts.get("notifications.push.init_failures")).toBe(1);
+    expect(sender).toBeInstanceOf(NoopPushNotificationSender);
   });
 });

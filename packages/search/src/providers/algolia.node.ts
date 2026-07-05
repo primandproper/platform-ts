@@ -9,7 +9,10 @@ import {
 import { algoliasearch, type Algoliasearch } from "algoliasearch";
 
 import {
+  type BulkDocument,
+  type BulkIndexManager,
   CircuitBrokenError,
+  DEFAULT_SEARCH_LIMIT,
   EmptyQueryError,
   ID_KEY,
   LENGTH_KEY,
@@ -35,7 +38,7 @@ export interface AlgoliaDocumentIndexOptions {
  * is guarded by the circuit breaker (including `index`, which the Go source omitted — fixed
  * here) and wrapped with context on failure.
  */
-export class AlgoliaDocumentIndex<T> implements DocumentIndex<T> {
+export class AlgoliaDocumentIndex<T> implements DocumentIndex<T>, BulkIndexManager {
   readonly #client: Algoliasearch;
   readonly #indexName: string;
   readonly #cb: CircuitBreaker;
@@ -78,6 +81,36 @@ export class AlgoliaDocumentIndex<T> implements DocumentIndex<T> {
     });
   }
 
+  indexMany(documents: readonly BulkDocument[]): Promise<void> {
+    return this.#observer.run("IndexMany", async (op) => {
+      if (documents.length === 0) {
+        return;
+      }
+      if (!this.#cb.canProceed()) {
+        throw new CircuitBrokenError();
+      }
+
+      op.set(LENGTH_KEY, documents.length);
+      this.#logger.debug("bulk adding to index");
+
+      // One `saveObjects` round trip: each doc keyed by objectID (Algolia's id), id mapped away.
+      const objects = documents.map(({ id, value }) => {
+        const record = toRecord(value);
+        record[OBJECT_ID_KEY] = id;
+        delete record.id;
+        return record;
+      });
+
+      try {
+        await this.#client.saveObjects({ indexName: this.#indexName, objects });
+        this.#cb.succeeded();
+      } catch (error) {
+        this.#cb.failed();
+        throw wrap("algolia bulk index failed", error);
+      }
+    });
+  }
+
   search(query: string): Promise<T[]> {
     return this.#observer.run("Search", async (op) => {
       if (!this.#cb.canProceed()) {
@@ -94,7 +127,8 @@ export class AlgoliaDocumentIndex<T> implements DocumentIndex<T> {
       try {
         const response = await this.#client.searchSingleIndex({
           indexName: this.#indexName,
-          searchParams: { query },
+          // Cap the result set explicitly; Algolia otherwise silently returns its first page of 20.
+          searchParams: { query, hitsPerPage: DEFAULT_SEARCH_LIMIT },
         });
         hits = response.hits;
         this.#cb.succeeded();

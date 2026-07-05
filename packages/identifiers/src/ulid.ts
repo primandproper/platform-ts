@@ -2,9 +2,13 @@ import { monotonicFactory, type PRNG, type ULIDFactory } from "ulid";
 
 import type { IdentifierGenerator } from "./generator.js";
 
-/** ULID is 26 chars of Crockford base32 (excludes I, L, O, U). */
+/**
+ * ULID is 26 chars of Crockford base32 (excludes I, L, O, U). The 26 chars encode 130 bits but a
+ * ULID is only 128, so the leading char carries 2 unused high bits and the spec caps it at `7`
+ * (`00111`); a first char of `8`–`Z` is a timestamp overflow and is not a valid ULID.
+ */
 const ULID_LENGTH = 26;
-const ULID_PATTERN = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+const ULID_PATTERN = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 
 /** Injectable clock + randomness for deterministic ULID generation in tests. */
 export interface UlidDeps {

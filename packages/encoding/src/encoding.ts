@@ -90,6 +90,61 @@ export class EncodingError extends PlatformError {
   }
 }
 
+/**
+ * Thrown by {@link ServerEncoderDecoder.decodeRequest} when the request body exceeds the
+ * configured `maxRequestBytes`. Distinct from {@link EncodingError} so a caller can map it to a
+ * `413 Payload Too Large` rather than a generic decode failure.
+ */
+export class RequestBodyTooLargeError extends PlatformError {
+  readonly limitBytes: number;
+  readonly actualBytes: number;
+  constructor(limitBytes: number, actualBytes: number) {
+    super(
+      "encoding/request-too-large",
+      `request body of ${String(actualBytes)} bytes exceeds the ${String(limitBytes)}-byte limit`,
+    );
+    this.name = "RequestBodyTooLargeError";
+    this.limitBytes = limitBytes;
+    this.actualBytes = actualBytes;
+  }
+}
+
+/**
+ * Thrown by {@link ServerEncoderDecoder.decodeRequest} when the request's `Content-Type` is not in
+ * the configured allow-list. Distinct from {@link EncodingError} so a caller can map it to a
+ * `415 Unsupported Media Type`.
+ */
+export class UnsupportedContentTypeError extends PlatformError {
+  readonly contentType: ContentType;
+  constructor(contentType: ContentType, allowed: readonly ContentType[]) {
+    super(
+      "encoding/unsupported-content-type",
+      `content type ${contentType} is not permitted (allowed: ${allowed.join(", ")})`,
+    );
+    this.name = "UnsupportedContentTypeError";
+    this.contentType = contentType;
+  }
+}
+
+/** One mebibyte — the default cap on a decoded request body, bounding attacker-typed input. */
+export const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024;
+
+/** Construction options for {@link DefaultServerEncoderDecoder}. */
+export interface ServerEncoderDecoderOptions {
+  /**
+   * Maximum accepted request-body size in bytes for {@link ServerEncoderDecoder.decodeRequest};
+   * `0` disables the cap. Defaults to {@link DEFAULT_MAX_REQUEST_BYTES}. Enforced both against the
+   * declared `Content-Length` and by counting bytes as the body streams in, so a lying or absent
+   * header can't defeat it.
+   */
+  maxRequestBytes?: number;
+  /**
+   * Content types permitted for {@link ServerEncoderDecoder.decodeRequest}. `undefined` allows
+   * every supported type; a list restricts the parser the incoming `Content-Type` can select.
+   */
+  allowedContentTypes?: readonly ContentType[] | undefined;
+}
+
 /** Every content type mapped to its codec. Always complete, so lookups never miss. */
 export type CodecRegistry = Record<ContentType, Codec>;
 
@@ -119,12 +174,51 @@ function instrument<T>(
     op.set("content_type", contentType);
     return fn(op);
   } catch (cause) {
-    const err = new EncodingError(action, contentType, cause);
-    op.error(err, err.message);
-    throw err;
+    throw recordEncodingError(op, action, contentType, cause);
   } finally {
     op.end();
   }
+}
+
+/**
+ * The async sibling of {@link instrument}: awaits `fn` so the span covers the whole async body
+ * (crucially, the request-body read) and the `op.end()` in `finally` fires only after it settles.
+ */
+async function instrumentAsync<T>(
+  observer: Observer,
+  action: "encode" | "decode",
+  contentType: ContentType,
+  fn: (op: Operation) => Promise<T>,
+): Promise<T> {
+  const op = observer.begin(`${o11yName}.${action}`);
+  try {
+    op.set("content_type", contentType);
+    return await fn(op);
+  } catch (cause) {
+    throw recordEncodingError(op, action, contentType, cause);
+  } finally {
+    op.end();
+  }
+}
+
+/**
+ * Records a failure on the operation and returns the error to throw. A {@link PlatformError} (our
+ * own typed size/content-type/errors errors) is recorded and passed through unchanged; anything
+ * else — a raw codec/library failure — is wrapped in an {@link EncodingError} at the seam.
+ */
+function recordEncodingError(
+  op: Operation,
+  action: "encode" | "decode",
+  contentType: ContentType,
+  cause: unknown,
+): unknown {
+  if (cause instanceof PlatformError) {
+    op.error(cause, cause.message);
+    return cause;
+  }
+  const err = new EncodingError(action, contentType, cause);
+  op.error(err, err.message);
+  return err;
 }
 
 /** Default {@link Encoder}: a single codec wrapped in observability and error handling. */
@@ -169,11 +263,19 @@ export class DefaultServerEncoderDecoder implements ServerEncoderDecoder {
   readonly #codecs: CodecRegistry;
   readonly #defaultContentType: ContentType;
   readonly #observer: Observer;
+  readonly #maxRequestBytes: number;
+  readonly #allowedContentTypes: readonly ContentType[] | undefined;
 
-  constructor(defaultContentType: ContentType, deps: ObservabilityDeps = {}) {
+  constructor(
+    defaultContentType: ContentType,
+    deps: ObservabilityDeps = {},
+    options: ServerEncoderDecoderOptions = {},
+  ) {
     this.#codecs = buildCodecs();
     this.#defaultContentType = defaultContentType;
     this.#observer = deps.observer ?? makeObserver(o11yName, deps);
+    this.#maxRequestBytes = options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
+    this.#allowedContentTypes = options.allowedContentTypes;
   }
 
   encodeResponse(value: unknown, status: number, contentType?: ContentType): Response {
@@ -191,11 +293,74 @@ export class DefaultServerEncoderDecoder implements ServerEncoderDecoder {
 
   async decodeRequest(request: Request): Promise<unknown> {
     const ct = contentTypeFromString(request.headers.get(ContentTypeHeaderKey));
-    const data = new Uint8Array(await request.arrayBuffer());
-    return instrument(this.#observer, "decode", ct, (op) => {
+    // The whole operation — content-type gate, bounded body read, and decode — runs inside the
+    // span so a rejected/oversized request is recorded, not silently read then thrown outside it.
+    return instrumentAsync(this.#observer, "decode", ct, async (op) => {
+      this.#assertContentTypeAllowed(ct);
+      const data = await this.#readBounded(request);
       op.set("length", data.byteLength);
       return this.#codecs[ct].decode(data);
     });
+  }
+
+  /** Rejects a request whose content type is outside the configured allow-list. */
+  #assertContentTypeAllowed(ct: ContentType): void {
+    if (
+      this.#allowedContentTypes !== undefined &&
+      !this.#allowedContentTypes.includes(ct)
+    ) {
+      throw new UnsupportedContentTypeError(ct, this.#allowedContentTypes);
+    }
+  }
+
+  /**
+   * Reads the request body, enforcing `maxRequestBytes`. Rejects early on a declared
+   * `Content-Length` over the limit, then counts bytes as the stream drains so an absent or lying
+   * header can't smuggle a larger payload. `0` disables the cap (a plain buffered read).
+   */
+  async #readBounded(request: Request): Promise<Uint8Array> {
+    const max = this.#maxRequestBytes;
+    if (max <= 0) {
+      return new Uint8Array(await request.arrayBuffer());
+    }
+
+    const declared = request.headers.get("content-length");
+    if (declared !== null) {
+      const length = Number(declared);
+      if (Number.isFinite(length) && length > max) {
+        throw new RequestBodyTooLargeError(max, length);
+      }
+    }
+
+    const body = request.body;
+    if (body === null) {
+      const bytes = new Uint8Array(await request.arrayBuffer());
+      if (bytes.byteLength > max) {
+        throw new RequestBodyTooLargeError(max, bytes.byteLength);
+      }
+      return bytes;
+    }
+
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        total += value.byteLength;
+        if (total > max) {
+          await reader.cancel();
+          throw new RequestBodyTooLargeError(max, total);
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return concatChunks(chunks, total);
   }
 
   decodeBytes(data: Uint8Array): unknown {
@@ -220,4 +385,15 @@ export class DefaultServerEncoderDecoder implements ServerEncoderDecoder {
       return out;
     });
   }
+}
+
+/** Joins the collected body chunks into one `Uint8Array` of the known total length. */
+function concatChunks(chunks: readonly Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
 }

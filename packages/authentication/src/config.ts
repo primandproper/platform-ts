@@ -6,7 +6,14 @@ import { z } from "zod";
  * derived key. Defaults follow Node's documented recommendations for interactive logins.
  */
 export const ScryptConfigSchema = z.object({
-  cost: z.number().int().positive().default(16384),
+  cost: z
+    .number()
+    .int()
+    .positive()
+    .refine((n) => n > 1 && (n & (n - 1)) === 0, {
+      message: "scrypt cost must be a power of two greater than one",
+    })
+    .default(16384),
   blockSize: z.number().int().positive().default(8),
   parallelization: z.number().int().positive().default(1),
   keyLength: z.number().int().positive().default(64),

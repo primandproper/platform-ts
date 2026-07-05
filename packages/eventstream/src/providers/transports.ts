@@ -17,9 +17,20 @@ export interface EventSourceLike {
   onopen: ((this: EventSourceLike, ev: unknown) => void) | null;
   onmessage: ((this: EventSourceLike, ev: EventSourceMessage) => void) | null;
   onerror: ((this: EventSourceLike, ev: unknown) => void) | null;
+  /**
+   * The connection state per the `EventSource` spec: `0` CONNECTING, `1` OPEN, `2` CLOSED. Read
+   * inside `onerror` to tell a transient reconnect (CONNECTING) from a fatal give-up (CLOSED),
+   * since `EventSource` multiplexes both through the same error event.
+   */
+  readonly readyState: number;
   addEventListener(type: string, listener: (ev: EventSourceMessage) => void): void;
+  removeEventListener(type: string, listener: (ev: EventSourceMessage) => void): void;
   close(): void;
 }
+
+/** `EventSource.readyState` values (the spec's named constants). */
+export const EVENT_SOURCE_CONNECTING = 0;
+export const EVENT_SOURCE_CLOSED = 2;
 
 /**
  * An injectable `EventSource` constructor. The browser/Node globals are assignable to this,

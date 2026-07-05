@@ -1,6 +1,11 @@
 import type { ObservabilityDeps } from "@primandproper/observability";
 
-import { SecretsConfigSchema, type SecretsConfigInput } from "./config.js";
+import {
+  SecretsConfigSchema,
+  type SecretsCacheConfig,
+  type SecretsConfigInput,
+} from "./config.js";
+import { CachingSecretSource } from "./providers/caching.js";
 import { EnvSecretSource } from "./providers/env.js";
 import { GCPSecretSource } from "./providers/gcp.node.js";
 import { KubectlSecretSource } from "./providers/kubectl.node.js";
@@ -29,6 +34,11 @@ export {
   type KubectlSecretSourceOptions,
   type K8sSecretReader,
 } from "./providers/kubectl.node.js";
+export {
+  CachingSecretSource,
+  type CachingSecretSourceOptions,
+  DEFAULT_SECRET_TTL_MS,
+} from "./providers/caching.js";
 
 /**
  * Narrows a per-provider config the schema's `superRefine` has already guaranteed present, so the
@@ -58,17 +68,44 @@ export function provideSecrets(
     case "noop":
       return new NoopSecretSource();
     case "gcp":
-      return new GCPSecretSource({ projectID: required(cfg.gcp, "gcp").projectID }, deps);
+      return maybeCache(
+        new GCPSecretSource({ projectID: required(cfg.gcp, "gcp").projectID }, deps),
+        cfg.cache,
+        deps,
+      );
     case "ssm": {
       const ssm = required(cfg.ssm, "ssm");
-      return new SSMSecretSource({ region: ssm.region, prefix: ssm.prefix }, deps);
+      return maybeCache(
+        new SSMSecretSource({ region: ssm.region, prefix: ssm.prefix }, deps),
+        cfg.cache,
+        deps,
+      );
     }
     case "kubectl": {
       const kubectl = required(cfg.kubectl, "kubectl");
-      return new KubectlSecretSource(
-        { namespace: kubectl.namespace, kubeconfig: kubectl.kubeconfig },
+      return maybeCache(
+        new KubectlSecretSource(
+          { namespace: kubectl.namespace, kubeconfig: kubectl.kubeconfig },
+          deps,
+        ),
+        cfg.cache,
         deps,
       );
     }
   }
+}
+
+/**
+ * Wraps a remote source in a {@link CachingSecretSource} unless caching is disabled or given a
+ * zero TTL. Local sources (env/static/noop) are never wrapped — there is nothing to memoize.
+ */
+function maybeCache(
+  source: SecretSource,
+  cache: SecretsCacheConfig,
+  deps: ObservabilityDeps | undefined,
+): SecretSource {
+  if (!cache.enabled || cache.ttlMs <= 0) {
+    return source;
+  }
+  return new CachingSecretSource(source, { ttlMs: cache.ttlMs }, deps);
 }

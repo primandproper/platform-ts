@@ -1,10 +1,16 @@
-import { type Tracer } from "@opentelemetry/api";
+import {
+  type Context,
+  propagation,
+  type TextMapPropagator,
+  type TextMapSetter,
+  type Tracer,
+} from "@opentelemetry/api";
 import {
   makeRecordingObserver,
   type Logger,
   type TracerProvider,
 } from "@primandproper/observability";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { assertOk, HttpError } from "./httpclient.js";
 import { FetchHttpClient, type FetchLike } from "./providers/fetch.js";
@@ -95,6 +101,11 @@ function recordingLogger(): {
 }
 
 describe("FetchHttpClient", () => {
+  afterEach(() => {
+    // Undo any global propagator a test installed so injection stays isolated.
+    propagation.disable();
+  });
+
   it("resolves a relative URL against baseUrl", async () => {
     const { fetch, calls } = fakeFetch(jsonResponse({}));
     const client = new FetchHttpClient({
@@ -190,6 +201,34 @@ describe("FetchHttpClient", () => {
     expect(res.status).toBe(200);
     expect(res.data).toStrictEqual({ id: 1, name: "grace" });
     expect(await res.text()).toBe('{"id":1,"name":"grace"}');
+  });
+
+  it("keeps a text/plain 2xx body as raw data instead of throwing (HTTP-1)", async () => {
+    const { fetch } = fakeFetch(
+      new Response("hello, not json", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+    const client = new FetchHttpClient({ headers: {}, timeoutMs: 0, fetch });
+
+    const res = await client.get("https://api.example.com/health");
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toBe("hello, not json");
+    expect(await res.text()).toBe("hello, not json");
+  });
+
+  it("parses json() lazily and memoizes the result (HTTP-1)", async () => {
+    const { fetch } = fakeFetch(jsonResponse({ id: 1 }));
+    const client = new FetchHttpClient({ headers: {}, timeoutMs: 0, fetch });
+
+    const res = await client.get("https://api.example.com/x");
+    const first = await res.json();
+    const second = await res.json();
+
+    expect(first).toStrictEqual({ id: 1 });
+    expect(second).toBe(first); // same cached object, not a re-parse
   });
 
   it("returns undefined data for an empty body", async () => {
@@ -298,7 +337,13 @@ describe("FetchHttpClient", () => {
     const client = new FetchHttpClient({
       headers: {},
       timeoutMs: 0,
-      retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0, jitter: 0 },
+      retry: {
+        maxAttempts: 3,
+        baseDelayMs: 0,
+        maxDelayMs: 0,
+        jitter: 0,
+        maxElapsedMs: 0,
+      },
       fetch,
     });
 
@@ -306,6 +351,93 @@ describe("FetchHttpClient", () => {
 
     expect(attempts).toBe(3);
     expect(res.ok).toBe(true);
+  });
+
+  it("does not retry a POST by default (non-idempotent)", async () => {
+    let attempts = 0;
+    const fetch: FetchLike = () => {
+      attempts += 1;
+      return Promise.reject(new Error("network down"));
+    };
+    const client = new FetchHttpClient({
+      headers: {},
+      timeoutMs: 0,
+      retry: {
+        maxAttempts: 3,
+        baseDelayMs: 0,
+        maxDelayMs: 0,
+        jitter: 0,
+        maxElapsedMs: 0,
+      },
+      fetch,
+    });
+
+    await expect(client.post("https://api.example.com/x", { a: 1 })).rejects.toThrow();
+    expect(attempts).toBe(1);
+  });
+
+  it("retries a POST when the caller opts in with idempotent:true", async () => {
+    let attempts = 0;
+    const fetch: FetchLike = () => {
+      attempts += 1;
+      return attempts < 3
+        ? Promise.reject(new Error("network down"))
+        : Promise.resolve(jsonResponse({ ok: true }));
+    };
+    const client = new FetchHttpClient({
+      headers: {},
+      timeoutMs: 0,
+      retry: {
+        maxAttempts: 3,
+        baseDelayMs: 0,
+        maxDelayMs: 0,
+        jitter: 0,
+        maxElapsedMs: 0,
+      },
+      fetch,
+    });
+
+    const res = await client.post(
+      "https://api.example.com/x",
+      { a: 1 },
+      {
+        idempotent: true,
+      },
+    );
+    expect(attempts).toBe(3);
+    expect(res.ok).toBe(true);
+  });
+
+  it("stops retrying immediately when the caller aborts mid-backoff", async () => {
+    const controller = new AbortController();
+    let attempts = 0;
+    const fetch: FetchLike = () => {
+      attempts += 1;
+      return Promise.reject(new Error("network down"));
+    };
+    const client = new FetchHttpClient({
+      headers: {},
+      timeoutMs: 0,
+      // A long backoff so the abort is what ends the wait, not the delay elapsing.
+      retry: {
+        maxAttempts: 5,
+        baseDelayMs: 60_000,
+        maxDelayMs: 60_000,
+        jitter: 0,
+        maxElapsedMs: 0,
+      },
+      fetch,
+    });
+
+    const pending = client
+      .get("https://api.example.com/x", { signal: controller.signal })
+      .catch((e: unknown) => e);
+    await Promise.resolve();
+    controller.abort(new Error("cancelled"));
+
+    await expect(pending).resolves.toBeInstanceOf(Error);
+    // One failed attempt, then the abort cut the backoff — no further attempts.
+    expect(attempts).toBe(1);
   });
 
   it("falls back to globalThis.fetch when none is injected", async () => {
@@ -361,6 +493,42 @@ describe("FetchHttpClient", () => {
 
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain("request to https://api.example.com/x failed");
+  });
+
+  it("injects W3C trace context into the outgoing request headers", async () => {
+    // A fake global propagator proves #buildInit routes the outgoing headers through
+    // propagation.inject; the real W3CTraceContextPropagator would need an active span with a
+    // valid span context, which the noop default tracer never produces.
+    const propagator: TextMapPropagator = {
+      inject(_ctx: Context, carrier: unknown, setter: TextMapSetter) {
+        setter.set(carrier, "traceparent", "00-abc-def-01");
+      },
+      extract: (ctx) => ctx,
+      fields: () => ["traceparent"],
+    };
+    propagation.setGlobalPropagator(propagator);
+
+    const { fetch, calls } = fakeFetch(jsonResponse({}));
+    const client = new FetchHttpClient({ headers: {}, timeoutMs: 0, fetch });
+
+    await client.get("https://api.example.com/x");
+
+    expect(new Headers(calls[0]?.init.headers).get("traceparent")).toBe("00-abc-def-01");
+  });
+
+  it("strips query-string values from telemetry but keeps them on the wire", async () => {
+    const { fetch, calls } = fakeFetch(jsonResponse({}));
+    const observer = makeRecordingObserver();
+    const client = new FetchHttpClient(
+      { headers: {}, timeoutMs: 0, fetch },
+      { observer },
+    );
+
+    await client.get("https://api.example.com/x?token=secret&page=2");
+
+    // The real request still carries the query; only the recorded url is stripped.
+    expect(calls[0]?.url).toContain("token=secret");
+    expect(observer.data()["url.full"]).toBe("https://api.example.com/x");
   });
 
   it("uses an injected observer and records what the request observes", async () => {

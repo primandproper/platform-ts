@@ -1,3 +1,4 @@
+import { SigningUnsupportedError } from "../bucket.js";
 import type {
   Attributer,
   Attributes,
@@ -49,6 +50,8 @@ export class NoopUploadManager
   }
 
   signedURL(): Promise<string> {
-    return Promise.resolve("");
+    // A noop manager can't sign a URL — reject rather than hand back a bogus empty string that a
+    // caller might treat as a working URL. Mirrors how config-selected buckets refuse signing.
+    return Promise.reject(new SigningUnsupportedError("noop"));
   }
 }

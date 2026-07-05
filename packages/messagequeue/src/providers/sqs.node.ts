@@ -21,7 +21,8 @@ import {
 } from "../messagequeue.js";
 
 import {
-  consumedCounter,
+  consumerInstruments,
+  type ConsumerInstruments,
   LENGTH_KEY,
   publisherInstruments,
   TOPIC_KEY,
@@ -31,6 +32,38 @@ import {
 
 const LONG_POLL_WAIT_SECONDS = 20;
 const MAX_NUMBER_OF_MESSAGES = 10;
+
+/** Backoff bounds for consecutive receive failures — a bad queue URL/IAM error must not hot-loop. */
+const RECEIVE_BACKOFF_BASE_MS = 100;
+const RECEIVE_BACKOFF_MAX_MS = 30_000;
+
+/** Full-jitter exponential backoff for the Nth (1-based) consecutive failure. */
+function receiveBackoffMs(failures: number): number {
+  const ceiling = Math.min(
+    RECEIVE_BACKOFF_MAX_MS,
+    RECEIVE_BACKOFF_BASE_MS * 2 ** (failures - 1),
+  );
+  return Math.random() * ceiling;
+}
+
+/** Sleeps `ms`, resolving early (never rejecting) if `signal` aborts first. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted === true) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 /**
  * SQS config. Faithful to Go's `sqs.Config`, whose provider otherwise reads AWS credentials and
@@ -74,7 +107,7 @@ class SQSPublisher implements Publisher {
   constructor(client: SQSClient, queueURL: string, deps?: ObservabilityDeps) {
     this.#client = client;
     this.#queueURL = queueURL;
-    this.#observer = makeObserver(`${queueURL}_publisher`, deps);
+    this.#observer = deps?.observer ?? makeObserver(`${queueURL}_publisher`, deps);
     this.#instruments = publisherInstruments(deps, queueURL);
   }
 
@@ -114,7 +147,9 @@ class SQSPublisher implements Publisher {
   }
 
   // SQS is a managed service with no per-publisher connection to release.
-  stop(): void {}
+  stop(): Promise<void> {
+    return Promise.resolve();
+  }
 }
 
 /** A {@link PublisherProvider} backed by Amazon SQS. Faithful to Go's `sqs` publisher. */
@@ -142,9 +177,10 @@ export class SQSPublisherProvider implements PublisherProvider {
     return Promise.resolve();
   }
 
-  close(): void {
+  close(): Promise<void> {
     this.#cache.clear();
     this.#client.destroy();
+    return Promise.resolve();
   }
 }
 
@@ -153,7 +189,7 @@ class SQSConsumer implements Consumer {
   readonly #queueURL: string;
   readonly #handler: ConsumerFunc;
   readonly #observer: Observer;
-  readonly #consumed: ReturnType<typeof consumedCounter>;
+  readonly #instruments: ConsumerInstruments;
 
   constructor(
     client: SQSClient,
@@ -164,8 +200,8 @@ class SQSConsumer implements Consumer {
     this.#client = client;
     this.#queueURL = queueURL;
     this.#handler = handler;
-    this.#observer = makeObserver(`${queueURL}_consumer`, deps);
-    this.#consumed = consumedCounter(deps, queueURL);
+    this.#observer = deps?.observer ?? makeObserver(`${queueURL}_consumer`, deps);
+    this.#instruments = consumerInstruments(deps, queueURL);
   }
 
   /**
@@ -174,6 +210,9 @@ class SQSConsumer implements Consumer {
    */
   async consume(signal?: AbortSignal, onError?: (err: unknown) => void): Promise<void> {
     const aborted = (): boolean => signal?.aborted === true;
+    // Consecutive receive failures back off exponentially so a persistent error (bad queue URL,
+    // denied IAM) can't spin a tight error loop; a successful receive resets the counter.
+    let consecutiveFailures = 0;
 
     for (;;) {
       if (aborted()) {
@@ -191,12 +230,17 @@ class SQSConsumer implements Consumer {
           signal === undefined ? undefined : { abortSignal: signal },
         );
         messages = output.Messages ?? [];
+        consecutiveFailures = 0;
       } catch (err) {
         if (aborted()) {
           return;
         }
-        this.#observer.logger().error("receiving SQS messages", err);
+        consecutiveFailures += 1;
+        this.#observer
+          .logger()
+          .error("receiving SQS messages", err, { consecutiveFailures });
         onError?.(err);
+        await abortableSleep(receiveBackoffMs(consecutiveFailures), signal);
         continue;
       }
 
@@ -226,11 +270,11 @@ class SQSConsumer implements Consumer {
       if (messageId !== undefined) {
         op.spanOnly("message_id", messageId);
       }
-      this.#consumed.add(1);
-
       try {
         await this.#handler(bytes);
+        this.#instruments.consumed.add(1);
       } catch (err) {
+        this.#instruments.consumeErrors.add(1);
         op.acknowledge(err, "handling SQS message");
         onError?.(err);
         return;
@@ -266,8 +310,16 @@ export class SQSConsumerProvider implements ConsumerProvider {
     if (topic === "") {
       return Promise.reject(ErrEmptyTopicName);
     }
-    return this.#cache.getOrBuild(topic, () =>
-      Promise.resolve(new SQSConsumer(this.#client, topic, handler, this.#deps)),
+    return this.#cache.getOrBuild(
+      topic,
+      () => Promise.resolve(new SQSConsumer(this.#client, topic, handler, this.#deps)),
+      handler,
     );
+  }
+
+  close(): Promise<void> {
+    this.#cache.clear();
+    this.#client.destroy();
+    return Promise.resolve();
   }
 }

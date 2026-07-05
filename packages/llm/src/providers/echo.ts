@@ -1,5 +1,6 @@
 import {
   lastUserMessage,
+  type CompletionChunk,
   type CompletionRequest,
   type CompletionResponse,
   type LLMProvider,
@@ -15,6 +16,12 @@ export class EchoLLMProvider implements LLMProvider {
       text: `echo: ${lastUserMessage(request.messages)}`,
       model: "echo",
     });
+  }
+
+  /** Streams the same echo as a single delta, then a terminal usage chunk. */
+  async *completeStream(request: CompletionRequest): AsyncGenerator<CompletionChunk> {
+    yield { delta: `echo: ${lastUserMessage(request.messages)}` };
+    yield { delta: "", stopReason: "stop", usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
   ping(): Promise<void> {

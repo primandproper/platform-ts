@@ -39,11 +39,18 @@ export function bytesToBase32(bytes: Uint8Array): string {
   return out;
 }
 
+/**
+ * Bytes fed to `String.fromCharCode` per call. Chunking keeps the binary string built in
+ * O(n/CHUNK) concatenations instead of one `+=` per byte, while staying under the engine's
+ * argument-count ceiling for a spread call.
+ */
+const BINARY_CHUNK = 0x8000;
+
 /** Encodes bytes as raw URL-safe base64: `+/` become `-_` and trailing `=` padding is stripped. */
 export function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
+  for (let i = 0; i < bytes.length; i += BINARY_CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + BINARY_CHUNK));
   }
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
