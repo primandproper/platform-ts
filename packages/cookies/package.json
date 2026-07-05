@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/cookies",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "type": "module",
   "description": "Isomorphic cookies: a CookieStore interface with swappable providers.",
   "license": "AGPL-3.0-or-later",

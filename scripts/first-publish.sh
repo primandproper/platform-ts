@@ -73,9 +73,36 @@ pnpm exec prettier --write "packages/*/package.json" > /dev/null
 pnpm install >/dev/null # reconcile lockfile importer versions
 pnpm build
 
-# -r skips the private root; --no-git-checks tolerates the dirty tree.
-echo "==> Publishing all packages..."
-pnpm -r publish --no-git-checks --access public ${DRY_RUN}
+# Idempotent: skip anything already on the registry (so an interrupted run is
+# safe to re-run), publish the rest. Per-package `pnpm publish` still rewrites
+# each workspace:* dep to the baseline version. --no-git-checks tolerates the dirty tree.
+echo "==> Publishing packages (skipping any already on the registry)..."
+pub=0; skip=0
+for d in packages/*/; do
+  name=$(node -e "try{process.stdout.write(require('./$d/package.json').name||'')}catch(e){}")
+  priv=$(node -e "try{process.stdout.write(String(!!require('./$d/package.json').private))}catch(e){process.stdout.write('true')}")
+  [ -z "$name" ] && continue
+  [ "$priv" = "true" ] && continue
+  if npm view "$name@$BASELINE" version >/dev/null 2>&1; then
+    echo "  skip    $name@$BASELINE (already published)"
+    skip=$((skip + 1)); continue
+  fi
+  echo "  publish $name@$BASELINE"
+  # `npm view` lags behind writes, so a package can 403 as already-published
+  # here even after the pre-check said missing. Treat that one case as a skip;
+  # any other failure (e.g. real permission error) still aborts.
+  if out=$(pnpm --filter "$name" publish --no-git-checks --access public ${DRY_RUN} 2>&1); then
+    pub=$((pub + 1))
+  elif printf '%s' "$out" | grep -qi 'previously published\|cannot publish over'; then
+    echo "  skip    $name@$BASELINE (already published; registry lag)"
+    skip=$((skip + 1))
+  else
+    printf '%s\n' "$out" >&2
+    echo "ERROR: failed to publish $name" >&2
+    exit 1
+  fi
+done
+echo "==> Published $pub, skipped $skip."
 
 cat <<EOF
 

@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/cryptography",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "type": "module",
   "description": "Isomorphic cryptography: Encryptor + Hasher interfaces over WebCrypto with swappable providers.",
   "license": "AGPL-3.0-or-later",

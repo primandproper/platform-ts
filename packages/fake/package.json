@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/fake",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "type": "module",
   "description": "Universal seeded test-data generation (thin wrapper over @faker-js/faker).",
   "license": "AGPL-3.0-or-later",

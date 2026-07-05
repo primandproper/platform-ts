@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/featureflags",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "type": "module",
   "description": "Server-only feature flags: a FeatureFlagManager interface with typed evaluation and swappable OpenFeature-backed providers.",
   "license": "AGPL-3.0-or-later",

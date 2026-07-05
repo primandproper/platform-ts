@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/filtering",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "type": "module",
   "description": "Universal list-query filtering: pagination, sorting, and date bounds compiled to SQL clause fragments.",
   "license": "AGPL-3.0-or-later",
