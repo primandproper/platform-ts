@@ -52,4 +52,16 @@ describe("consoleLogger", () => {
       expect.objectContaining({ userId: 7 }),
     );
   });
+
+  // OBS-4: attaching context to a single line is one argument, no child-logger allocation.
+  it("attaches per-line values passed inline", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    consoleLogger({ level: "info", name: "svc" }).info("cache miss", { key: "user:7" });
+
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining("cache miss"),
+      expect.objectContaining({ key: "user:7" }),
+    );
+  });
 });

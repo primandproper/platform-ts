@@ -1,15 +1,32 @@
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 
 import {
+  makeMetrics,
   makeObserver,
-  type Logger,
+  type Metrics,
   type ObservabilityDeps,
   type Observer,
 } from "@primandproper/observability";
 
+import { InvalidScryptCostError, PasswordHashError } from "../errors.js";
 import type { PasswordHasher } from "../password.js";
 
+type Counter = ReturnType<Metrics["counter"]>;
+
 const o11yName = "authentication";
+
+// Ceilings applied to cost parameters read out of an *untrusted* encoded hash during verify().
+// Without them a hostile hash could name an enormous `N`/`r` and drive scrypt to allocate GBs
+// (memory scales as ~128·N·r). These bound legitimate hashes comfortably (defaults are N=16384,
+// r=8, p=1) while rejecting adversarial ones as malformed.
+const MAX_COST = 1 << 20; // N ceiling (1,048,576)
+const MAX_BLOCK_SIZE = 32; // r ceiling
+const MAX_PARALLELIZATION = 16; // p ceiling
+
+/** True when `n` is a power of two greater than one — the requirement scrypt places on `N`. */
+function isPowerOfTwo(n: number): boolean {
+  return Number.isInteger(n) && n > 1 && (n & (n - 1)) === 0;
+}
 
 export interface ScryptHasherOptions {
   /** CPU/memory cost factor `N`; must be a power of two. */
@@ -66,52 +83,71 @@ export class ScryptHasher implements PasswordHasher {
   readonly #keyLength: number;
   readonly #saltLength: number;
   readonly #observer: Observer;
-  readonly #logger: Logger;
+  readonly #verifications: Counter;
 
   constructor(options: ScryptHasherOptions = {}, deps: ObservabilityDeps = {}) {
     this.#cost = options.cost ?? 16384;
+    if (!isPowerOfTwo(this.#cost)) {
+      throw new InvalidScryptCostError(this.#cost);
+    }
     this.#blockSize = options.blockSize ?? 8;
     this.#parallelization = options.parallelization ?? 1;
     this.#keyLength = options.keyLength ?? 64;
     this.#saltLength = options.saltLength ?? 16;
     this.#observer = deps.observer ?? makeObserver(o11yName, deps);
-    this.#logger = this.#observer.logger();
+    this.#verifications = makeMetrics(o11yName, deps.metrics).counter(
+      "authentication.password.verifications",
+      { description: "Password verification attempts, by outcome." },
+    );
   }
 
   async hash(password: string): Promise<string> {
-    const salt = randomBytes(this.#saltLength);
-    const key = await deriveKey(
-      password,
-      salt,
-      this.#cost,
-      this.#blockSize,
-      this.#parallelization,
-      this.#keyLength,
-    );
-    const params = `N=${String(this.#cost)},r=${String(this.#blockSize)},p=${String(this.#parallelization)}`;
-    return `${PREFIX}$${params}$${salt.toString("base64")}$${key.toString("base64")}`;
+    try {
+      const salt = randomBytes(this.#saltLength);
+      const key = await deriveKey(
+        password,
+        salt,
+        this.#cost,
+        this.#blockSize,
+        this.#parallelization,
+        this.#keyLength,
+      );
+      const params = `N=${String(this.#cost)},r=${String(this.#blockSize)},p=${String(this.#parallelization)}`;
+      return `${PREFIX}$${params}$${salt.toString("base64")}$${key.toString("base64")}`;
+    } catch (err) {
+      throw new PasswordHashError(err);
+    }
   }
 
   async verify(password: string, encoded: string): Promise<boolean> {
-    const parsed = parseEncoded(encoded);
-    if (parsed === undefined) {
-      this.#logger.debug("malformed encoded password hash");
-      return false;
-    }
-    try {
-      const key = await deriveKey(
-        password,
-        parsed.salt,
-        parsed.cost,
-        parsed.blockSize,
-        parsed.parallelization,
-        parsed.hash.length,
-      );
-      return key.length === parsed.hash.length && timingSafeEqual(key, parsed.hash);
-    } catch (err) {
-      this.#logger.error("verifying password hash", err);
-      return false;
-    }
+    return this.#observer.run("verify", async (op) => {
+      const parsed = parseEncoded(encoded);
+      if (parsed === undefined) {
+        this.#verifications.add(1, { outcome: "failure" });
+        op.logger().debug("malformed encoded password hash");
+        return false;
+      }
+      try {
+        const key = await deriveKey(
+          password,
+          parsed.salt,
+          parsed.cost,
+          parsed.blockSize,
+          parsed.parallelization,
+          parsed.hash.length,
+        );
+        const matched =
+          key.length === parsed.hash.length && timingSafeEqual(key, parsed.hash);
+        const outcome = matched ? "success" : "failure";
+        this.#verifications.add(1, { outcome });
+        op.logger().debug(`password verification ${outcome}`);
+        return matched;
+      } catch (err) {
+        this.#verifications.add(1, { outcome: "failure" });
+        op.acknowledge(err, "verifying password hash");
+        return false;
+      }
+    });
   }
 }
 
@@ -144,6 +180,18 @@ function parseEncoded(encoded: string): ParsedHash | undefined {
   const blockSize = params.get("r");
   const parallelization = params.get("p");
   if (cost === undefined || blockSize === undefined || parallelization === undefined) {
+    return undefined;
+  }
+  // Reject cost parameters outside sane bounds so a hostile hash can't drive scrypt to allocate
+  // GBs. An out-of-range parameter is treated as a malformed hash (verify → false), never a throw.
+  if (
+    !isPowerOfTwo(cost) ||
+    cost > MAX_COST ||
+    blockSize < 1 ||
+    blockSize > MAX_BLOCK_SIZE ||
+    parallelization < 1 ||
+    parallelization > MAX_PARALLELIZATION
+  ) {
     return undefined;
   }
 

@@ -1,8 +1,29 @@
-import { describe, expect, it } from "vitest";
+import type { Logger, LogValues } from "@primandproper/observability";
+import { describe, expect, it, vi } from "vitest";
 
 import type { FeatureFlagManager } from "./featureflags.js";
 import { NoopFeatureFlagManager } from "./providers/noop.js";
 import { StaticFeatureFlagManager } from "./providers/static.js";
+
+/** A Logger that records each debug line's message and values; chainable methods return itself. */
+function recordingLogger(): {
+  logger: Logger;
+  debugs: { message: string; values: LogValues | undefined }[];
+} {
+  const debugs: { message: string; values: LogValues | undefined }[] = [];
+  const logger: Logger = {
+    debug: (message, values) => {
+      debugs.push({ message, values });
+    },
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    with: () => logger,
+    child: () => logger,
+    withSpan: () => logger,
+  };
+  return { logger, debugs };
+}
 
 /**
  * Provider-agnostic conformance suite. Running the same assertions against multiple
@@ -126,6 +147,51 @@ describe("StaticFeatureFlagManager allFlags", () => {
       a: 1,
       b: "on",
     });
+  });
+});
+
+describe("StaticFeatureFlagManager logging", () => {
+  it("names the flag key when a flag is not found", async () => {
+    const { logger, debugs } = recordingLogger();
+    const ff = new StaticFeatureFlagManager({ flags: { known: true } }, { logger });
+
+    expect(await ff.evaluate("missing", false)).toBe(false);
+
+    const line = debugs.find((d) => d.message === "feature flag not found");
+    expect(line?.values).toMatchObject({ key: "missing" });
+  });
+});
+
+describe("StaticFeatureFlagManager type safety", () => {
+  it("returns the default and warns when the stored value's type differs from the requested type", async () => {
+    const warns: { message: string; values: LogValues | undefined }[] = [];
+    const logger: Logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: (message, values) => {
+        warns.push({ message, values });
+      },
+      error: vi.fn(),
+      with: () => logger,
+      child: () => logger,
+      withSpan: () => logger,
+    };
+    // Flag stored as a string, evaluated with a boolean default.
+    const ff = new StaticFeatureFlagManager({ flags: { feature: "on" } }, { logger });
+
+    const value = await ff.evaluate("feature", false);
+    expect(value).toBe(false);
+    const line = warns.find((w) => w.message.includes("type mismatch"));
+    expect(line?.values).toMatchObject({
+      key: "feature",
+      expected: "boolean",
+      actual: "string",
+    });
+  });
+
+  it("still returns a matching-typed flag value", async () => {
+    const ff = new StaticFeatureFlagManager({ flags: { feature: "on" } });
+    expect(await ff.evaluate("feature", "off")).toBe("on");
   });
 });
 

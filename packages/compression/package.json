@@ -41,6 +41,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
+    "@primandproper/errors": "workspace:*",
     "@primandproper/observability": "workspace:*",
     "zod": "3.25.76"
   }

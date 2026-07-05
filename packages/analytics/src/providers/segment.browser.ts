@@ -1,10 +1,16 @@
-import type { ObservabilityDeps } from "@primandproper/observability";
+import {
+  makeMetrics,
+  makeObserver,
+  type ObservabilityDeps,
+} from "@primandproper/observability";
 import { AnalyticsBrowser } from "@segment/analytics-next";
 
 import type { EventProperties, EventReporter } from "../analytics.js";
 import type { SegmentConfig } from "../config.js";
 
 import { VendorReporter } from "./vendor.js";
+
+const o11yName = "analytics";
 
 /**
  * The slice of the buffered `analytics-next` client the adapter calls. The SDK exposes these
@@ -27,9 +33,21 @@ export function provideSegment(
   config: SegmentConfig,
   deps: ObservabilityDeps = {},
 ): EventReporter {
-  const analytics = AnalyticsBrowser.load({
-    writeKey: config.writeKey,
-  }) as unknown as SegmentBrowserClient;
+  const observer = deps.observer ?? makeObserver(o11yName, deps);
+  const loadFailures = makeMetrics(o11yName, deps.metrics).counter(
+    "analytics.source.load_failures",
+    { description: "Analytics source client load failures, by source." },
+  );
+  const loaded = AnalyticsBrowser.load({ writeKey: config.writeKey });
+  // The browser SDK loads asynchronously and swallows load failures (bad write key, blocked
+  // network); surface them so a source that never comes up isn't invisible.
+  void Promise.resolve(loaded).catch((err: unknown) => {
+    observer
+      .logger()
+      .error("segment analytics failed to load", err, { source: "segment" });
+    loadFailures.add(1, { source: "segment" });
+  });
+  const analytics = loaded as unknown as SegmentBrowserClient;
   return new VendorReporter(
     "segment",
     {

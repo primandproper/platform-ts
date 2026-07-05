@@ -31,6 +31,12 @@ export class PyroscopeProfiler implements Profiler {
   constructor(config: ProfilingConfig, deps: ObservabilityDeps = {}) {
     this.#config = config;
     this.#logger = ensureLogger(deps.logger).child("profiling");
+    // Warn at construction through console, not just the (possibly-noop) injected logger, so
+    // selecting an unimplemented provider can never be a fully silent no-op.
+    console.warn(
+      `[observability] profiling provider 'pyroscope' is experimental and unimplemented; ` +
+        `'${this.#config.name}' will not be profiled until a profiler is wired (see providers/profiling.node.ts)`,
+    );
   }
 
   start(): Promise<void> {

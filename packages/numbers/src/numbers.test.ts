@@ -47,6 +47,16 @@ describe("round", () => {
     expect(() => round(1.5, -1)).toThrow(RangeError);
     expect(() => round(1.5, 1.5)).toThrow(RangeError);
   });
+
+  // NUM-1: magnitudes JS prints in exponential notation must round, not return NaN.
+  it("does not return NaN for exponential-notation magnitudes", () => {
+    expect(round(1e21)).toBe(1e21);
+    expect(round(1e-7, 0)).toBe(0); // 0.0000001 rounds to 0 at 0 decimals
+    expect(round(1e-7, 8)).toBe(1e-7); // representable at 8 decimals
+    expect(round(5e-7, 6)).toBe(1e-6); // half away from zero
+    expect(round(-1e21)).toBe(-1e21);
+    expect(Number.isNaN(round(1.23e22, 2))).toBe(false);
+  });
 });
 
 describe("roundToNearest", () => {

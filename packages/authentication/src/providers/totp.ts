@@ -1,13 +1,17 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import {
+  makeMetrics,
   makeObserver,
-  type Logger,
+  type Metrics,
   type ObservabilityDeps,
   type Observer,
 } from "@primandproper/observability";
 
+import { InvalidTOTPSecretError } from "../errors.js";
 import type { TOTP } from "../totp.js";
+
+type Counter = ReturnType<Metrics["counter"]>;
 
 const o11yName = "authentication";
 
@@ -43,7 +47,11 @@ function base32Encode(bytes: Buffer): string {
   return out;
 }
 
-/** Decodes an RFC 4648 base32 string (padding and case insensitive). Throws on invalid input. */
+/**
+ * Decodes an RFC 4648 base32 string (padding and case insensitive). Throws
+ * {@link InvalidTOTPSecretError} on invalid input — deliberately without echoing any character
+ * of the secret into the error message.
+ */
 function base32Decode(input: string): Buffer {
   const normalized = input.replace(/=+$/u, "").toUpperCase().replace(/\s/gu, "");
   let bits = 0;
@@ -52,7 +60,7 @@ function base32Decode(input: string): Buffer {
   for (const char of normalized) {
     const index = BASE32_ALPHABET.indexOf(char);
     if (index === -1) {
-      throw new Error(`invalid base32 character: ${char}`);
+      throw new InvalidTOTPSecretError();
     }
     value = (value << 5) | index;
     bits += 5;
@@ -76,14 +84,17 @@ export class RFC6238TOTP implements TOTP {
   readonly #digits: number;
   readonly #period: number;
   readonly #observer: Observer;
-  readonly #logger: Logger;
+  readonly #verifications: Counter;
 
   constructor(options: RFC6238TOTPOptions = {}, deps: ObservabilityDeps = {}) {
     this.#algorithm = options.algorithm ?? "SHA1";
     this.#digits = options.digits ?? 6;
     this.#period = options.period ?? 30;
     this.#observer = deps.observer ?? makeObserver(o11yName, deps);
-    this.#logger = this.#observer.logger();
+    this.#verifications = makeMetrics(o11yName, deps.metrics).counter(
+      "authentication.totp.verifications",
+      { description: "TOTP verification attempts, by outcome." },
+    );
   }
 
   generateSecret(bytes = 20): string {
@@ -102,10 +113,22 @@ export class RFC6238TOTP implements TOTP {
     return `otpauth://totp/${label}?${params.toString()}`;
   }
 
+  /**
+   * Returns the code for `secret` at `atMs`. Throws {@link InvalidTOTPSecretError} when `secret`
+   * is not valid base32 (rather than letting a raw decode error escape).
+   */
   generate(secret: string, atMs: number = Date.now()): string {
     return this.#codeForCounter(secret, this.#counterAt(atMs));
   }
 
+  /**
+   * Verifies `code` against `secret` within `±window` time steps. Returns `false` (never throws)
+   * for a wrong code or a malformed secret.
+   *
+   * NOTE: this does **not** prevent replay — a valid code stays valid for the whole step (and any
+   * accepted `window` neighbours). The caller must record accepted `(user, counter)` pairs and
+   * reject a second use to make one-time codes actually one-time.
+   */
   verify(
     secret: string,
     code: string,
@@ -113,18 +136,26 @@ export class RFC6238TOTP implements TOTP {
   ): boolean {
     const window = opts.window ?? 1;
     const counter = this.#counterAt(opts.atMs ?? Date.now());
+    const op = this.#observer.begin("verify");
     try {
       for (let offset = -window; offset <= window; offset++) {
         const candidate = this.#codeForCounter(secret, counter + offset);
         if (constantTimeEqual(candidate, code)) {
+          this.#verifications.add(1, { outcome: "success" });
+          op.logger().debug("TOTP verification success");
           return true;
         }
       }
-    } catch (err) {
-      this.#logger.error("verifying TOTP code", err);
+      this.#verifications.add(1, { outcome: "failure" });
+      op.logger().debug("TOTP verification failure");
       return false;
+    } catch (err) {
+      this.#verifications.add(1, { outcome: "failure" });
+      op.acknowledge(err, "verifying TOTP code");
+      return false;
+    } finally {
+      op.end();
     }
-    return false;
   }
 
   #counterAt(atMs: number): number {

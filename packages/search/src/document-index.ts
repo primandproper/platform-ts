@@ -24,6 +24,27 @@ export interface IndexManager {
   wipe(): Promise<void>;
 }
 
+/** A document to bulk-index: an `id` and the arbitrary serializable `value` stored under it. */
+export interface BulkDocument {
+  id: string;
+  value: unknown;
+}
+
+/**
+ * An {@link IndexManager} that can index many documents in one backend round trip (Elasticsearch
+ * `_bulk`, Algolia `saveObjects`, Typesense `import`) instead of N sequential `index()` calls.
+ * Not every manager supports it, so obtain one via {@link isBulkIndexManager}.
+ */
+export interface BulkIndexManager extends IndexManager {
+  /** Indexes (or replaces) every document in a single batched operation. */
+  indexMany(documents: readonly BulkDocument[]): Promise<void>;
+}
+
+/** Narrows an {@link IndexManager} to a {@link BulkIndexManager} when the provider supports batching. */
+export function isBulkIndexManager(manager: IndexManager): manager is BulkIndexManager {
+  return typeof (manager as Partial<BulkIndexManager>).indexMany === "function";
+}
+
 /**
  * A generic, provider-swappable text search index combining {@link IndexSearcher} and
  * {@link IndexManager}. The faithful TypeScript port of platform-go's `textsearch.Index[T]`,
@@ -52,6 +73,14 @@ export interface IndexRequest {
 
 /** The query-param key carrying the search text in HTTP requests. Port of `QueryKeySearch`. */
 export const QUERY_KEY_SEARCH = "q";
+
+/**
+ * The number of hits returned when a caller doesn't specify a limit. Applied uniformly across
+ * every provider so the result-set size is an explicit, documented contract rather than each
+ * backend's own silent default (Typesense/ES 10, Algolia 20, memory unbounded). `IndexSearcher`
+ * providers (Elasticsearch, Algolia) take no per-call limit, so this is their fixed page size.
+ */
+export const DEFAULT_SEARCH_LIMIT = 10;
 
 /**
  * Observability keys the providers attach to spans/logs, matching platform-go's

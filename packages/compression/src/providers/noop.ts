@@ -9,4 +9,12 @@ export class NoopCompressor implements Compressor {
   decompress(data: Uint8Array): Promise<Uint8Array> {
     return Promise.resolve(data);
   }
+
+  compressStream(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+    return source;
+  }
+
+  decompressStream(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+    return source;
+  }
 }

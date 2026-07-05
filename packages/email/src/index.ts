@@ -45,7 +45,12 @@ export function provideEmail(config?: EmailConfigInput, deps?: ObservabilityDeps
         throw new Error("resend config is required when provider is 'resend'");
       }
       return new ResendEmail(
-        { apiKey: cfg.resend.apiKey, baseUrl: cfg.resend.baseUrl },
+        {
+          apiKey: cfg.resend.apiKey,
+          baseUrl: cfg.resend.baseUrl,
+          timeoutMs: cfg.resend.timeoutMs,
+          retry: cfg.resend.retry,
+        },
         deps,
       );
     case "postmark":
@@ -59,7 +64,12 @@ export function provideEmail(config?: EmailConfigInput, deps?: ObservabilityDeps
         throw new Error("sendgrid config is required when provider is 'sendgrid'");
       }
       return new SendgridEmail(
-        { apiKey: cfg.sendgrid.apiKey, baseUrl: cfg.sendgrid.baseUrl },
+        {
+          apiKey: cfg.sendgrid.apiKey,
+          baseUrl: cfg.sendgrid.baseUrl,
+          timeoutMs: cfg.sendgrid.timeoutMs,
+          retry: cfg.sendgrid.retry,
+        },
         deps,
       );
     case "mailgun":
@@ -71,6 +81,8 @@ export function provideEmail(config?: EmailConfigInput, deps?: ObservabilityDeps
           apiKey: cfg.mailgun.apiKey,
           domain: cfg.mailgun.domain,
           baseUrl: cfg.mailgun.baseUrl,
+          timeoutMs: cfg.mailgun.timeoutMs,
+          retry: cfg.mailgun.retry,
         },
         deps,
       );
@@ -83,6 +95,8 @@ export function provideEmail(config?: EmailConfigInput, deps?: ObservabilityDeps
           apiKey: cfg.mailjet.apiKey,
           secretKey: cfg.mailjet.secretKey,
           baseUrl: cfg.mailjet.baseUrl,
+          timeoutMs: cfg.mailjet.timeoutMs,
+          retry: cfg.mailjet.retry,
         },
         deps,
       );

@@ -45,9 +45,21 @@ export const DatabaseConfigSchema = z.object({
 export type DatabaseConfig = z.infer<typeof DatabaseConfigSchema>;
 export type DatabaseConfigInput = z.input<typeof DatabaseConfigSchema>;
 
-/** Postgres key=value DSN (`pgx`/libpq style). */
+/**
+ * Quotes a libpq key=value component. An empty value, or one containing whitespace, a single
+ * quote, or a backslash, is single-quoted with `'` and `\` backslash-escaped — otherwise a
+ * password like `p@ss word` would silently truncate the DSN at the space.
+ */
+function pgKeyValueQuote(value: string): string {
+  if (value === "" || /[\s'\\]/u.test(value)) {
+    return `'${value.replace(/(['\\])/gu, "\\$1")}'`;
+  }
+  return value;
+}
+
+/** Postgres key=value DSN (`pgx`/libpq style). Components are quoted so special chars survive. */
 export function postgresKeyValue(cd: ConnectionDetails): string {
-  return `user=${cd.username} password=${cd.password} database=${cd.database} host=${cd.host} port=${String(cd.port)}`;
+  return `user=${pgKeyValueQuote(cd.username)} password=${pgKeyValueQuote(cd.password)} database=${pgKeyValueQuote(cd.database)} host=${pgKeyValueQuote(cd.host)} port=${String(cd.port)}`;
 }
 
 /**
@@ -56,18 +68,56 @@ export function postgresKeyValue(cd: ConnectionDetails): string {
  */
 export function postgresUri(cd: ConnectionDetails): string {
   const auth = `${encodeURIComponent(cd.username)}:${encodeURIComponent(cd.password)}`;
-  const base = `postgres://${auth}@${cd.host}:${String(cd.port)}/${cd.database}`;
+  const base = `postgres://${auth}@${cd.host}:${String(cd.port)}/${encodeURIComponent(cd.database)}`;
   return cd.disableSSL ? `${base}?sslmode=disable` : base;
 }
 
-/** MySQL DSN in `go-sql-driver`/`mysql2` form. */
+/**
+ * MySQL connection URI (`mysql://user:pass@host:port/db`) — the form `mysql2` parses. platform-go
+ * hands `go-sql-driver` its `user:pass@tcp(host:port)/db` DSN, which no JS driver understands; the
+ * URI is the equivalent JS drivers expect. Credentials are percent-encoded so `@`/`:`/`/` survive.
+ */
 export function mysqlDsn(cd: ConnectionDetails): string {
-  return `${cd.username}:${cd.password}@tcp(${cd.host}:${String(cd.port)})/${cd.database}`;
+  const auth = `${encodeURIComponent(cd.username)}:${encodeURIComponent(cd.password)}`;
+  return `mysql://${auth}@${cd.host}:${String(cd.port)}/${encodeURIComponent(cd.database)}`;
 }
 
 /** SQLite "DSN" — just the database file path. */
 export function sqlitePath(cd: ConnectionDetails): string {
   return cd.database;
+}
+
+/**
+ * `node-postgres` `Pool` options derived from the driver-agnostic pool config, so these settings
+ * actually reach a pool rather than being parsed and discarded. `maxOpenConns` → `max`;
+ * `connMaxLifetimeMs` → `maxLifetimeSeconds`. pg bounds only the total client count (`max`) and has
+ * no separate idle cap, so `maxIdleConns` has no pg equivalent and is intentionally not mapped.
+ * Spread into pool construction: `new Pool({ connectionString, ...pgPoolSettings(cfg) })`.
+ */
+export function pgPoolSettings(config: DatabaseConfig): {
+  max: number;
+  maxLifetimeSeconds: number;
+} {
+  return {
+    max: config.maxOpenConns,
+    maxLifetimeSeconds: Math.ceil(config.connMaxLifetimeMs / 1000),
+  };
+}
+
+/**
+ * `mysql2` `Pool` options derived from the pool config. `maxOpenConns` → `connectionLimit`;
+ * `maxIdleConns` → `maxIdle`. mysql2 has no per-connection max-lifetime, so `connMaxLifetimeMs` is
+ * intentionally not mapped. Spread into pool construction:
+ * `mysql.createPool({ uri, ...mysqlPoolSettings(cfg) })`.
+ */
+export function mysqlPoolSettings(config: DatabaseConfig): {
+  connectionLimit: number;
+  maxIdle: number;
+} {
+  return {
+    connectionLimit: config.maxOpenConns,
+    maxIdle: config.maxIdleConns,
+  };
 }
 
 function connectionStringFor(provider: DatabaseProvider, cd: ConnectionDetails): string {

@@ -1,4 +1,12 @@
-import { metrics, trace, type Meter, type Tracer } from "@opentelemetry/api";
+import {
+  createNoopMeter,
+  INVALID_SPAN_CONTEXT,
+  metrics,
+  trace,
+  type Meter,
+  type Span,
+  type Tracer,
+} from "@opentelemetry/api";
 
 import type { Logger } from "./logger.js";
 import type { Observer } from "./observer.js";
@@ -16,15 +24,41 @@ export interface MeterProvider {
 }
 
 /**
- * Default providers backed by the global OTel API. With no SDK registered these are the
- * OTel no-op implementations, so observability is always safe to call.
+ * Default providers backed by the global OTel API. With no SDK registered these resolve to the
+ * OTel no-op implementations, but once an SDK is registered globally (the common Node setup)
+ * spans and metrics flow through automatically. These are the fallbacks used everywhere a caller
+ * doesn't inject an explicit provider.
  */
-export const noopTracerProvider: TracerProvider = {
+export const defaultTracerProvider: TracerProvider = {
   getTracer: (name) => trace.getTracer(name),
 };
 
-export const noopMeterProvider: MeterProvider = {
+export const defaultMeterProvider: MeterProvider = {
   getMeter: (name) => metrics.getMeter(name),
+};
+
+/**
+ * Genuinely inert providers, independent of any globally-registered SDK. Selected by
+ * `provider: "noop"` when a caller wants to force observability off regardless of what else is
+ * wired up (the {@link defaultTracerProvider}/{@link defaultMeterProvider} would otherwise
+ * pick up a registered global SDK).
+ */
+// A non-recording span over an invalid context: every mutator is a no-op and it emits nowhere.
+const nonRecordingSpan: Span = trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
+const noopTracer: Tracer = {
+  startSpan: () => nonRecordingSpan,
+  startActiveSpan: (...args: unknown[]) => {
+    const fn = args[args.length - 1] as (span: Span) => unknown;
+    return fn(nonRecordingSpan);
+  },
+};
+export const noopTracerProvider: TracerProvider = {
+  getTracer: () => noopTracer,
+};
+
+const noopMeter = createNoopMeter();
+export const noopMeterProvider: MeterProvider = {
+  getMeter: () => noopMeter,
 };
 
 /**

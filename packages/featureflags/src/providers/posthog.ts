@@ -7,10 +7,13 @@ import type { FeatureFlagManager } from "../featureflags.js";
 import { OpenFeatureFeatureFlagManager } from "./openfeature.js";
 
 /**
- * OpenFeature client domain for the PostHog provider; isolates this provider's registration
- * from any other OpenFeature client in the process, mirroring the Go platform's `clientDomain`.
+ * Base for the OpenFeature client domain of each PostHog manager. A per-call unique suffix is
+ * appended so a second construction registers under its own domain instead of silently rebinding
+ * (and closing) the first manager's provider — the isolation the constant Go `clientDomain` lacks.
  */
-const CLIENT_DOMAIN = "posthog_feature_flags";
+const CLIENT_DOMAIN_BASE = "posthog_feature_flags";
+
+let instanceCount = 0;
 
 export interface PostHogOptions {
   /** PostHog project API key, used for event capture. */
@@ -48,6 +51,8 @@ export async function providePostHogFeatureFlags(
       ...(options.host ? { clientOptions: { host: options.host } } : {}),
     },
   });
-  await OpenFeature.setProviderAndWait(CLIENT_DOMAIN, provider);
-  return new OpenFeatureFeatureFlagManager(OpenFeature.getClient(CLIENT_DOMAIN), deps);
+  instanceCount += 1;
+  const domain = `${CLIENT_DOMAIN_BASE}_${instanceCount.toString()}`;
+  await OpenFeature.setProviderAndWait(domain, provider);
+  return new OpenFeatureFeatureFlagManager(OpenFeature.getClient(domain), deps, domain);
 }

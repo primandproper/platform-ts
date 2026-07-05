@@ -53,4 +53,12 @@ export abstract class BaseFeatureFlagManager implements FeatureFlagManager {
   ): Promise<T> {
     return this.evaluate<T>(key, defaultValue, context);
   }
+
+  /**
+   * Default no-op shutdown for providers that hold no resources (static, noop). Providers with a
+   * backing SDK (OpenFeature-based) override this to flush and release it.
+   */
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
 }

@@ -41,7 +41,10 @@ export function provideServerEncoderDecoder(
   deps?: ObservabilityDeps,
 ): ServerEncoderDecoder {
   const cfg = EncodingConfigSchema.parse(config ?? {});
-  return new DefaultServerEncoderDecoder(cfg.contentType, deps);
+  return new DefaultServerEncoderDecoder(cfg.contentType, deps, {
+    maxRequestBytes: cfg.maxRequestBytes,
+    allowedContentTypes: cfg.allowedContentTypes,
+  });
 }
 
 // Package-level convenience helpers, mirroring platform-go's `utils.go`. They carry no

@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CircuitBrokenError,
   EmptyQueryError,
+  isBulkIndexManager,
   SEARCH_QUERY_KEY,
   type DocumentIndex,
 } from "./document-index.js";
@@ -57,6 +58,22 @@ function conformance(name: string, make: () => DocumentIndex<Doc>): void {
 }
 
 conformance("NoopDocumentIndex", () => new NoopDocumentIndex<Doc>());
+
+describe("bulk indexing seam (PERF-5)", () => {
+  it("exposes a discoverable indexMany on the noop manager", async () => {
+    const index: DocumentIndex<Doc> = new NoopDocumentIndex<Doc>();
+    expect(isBulkIndexManager(index)).toBe(true);
+    // The guard narrows to the bulk surface — the intended way callers reach indexMany.
+    if (isBulkIndexManager(index)) {
+      await expect(
+        index.indexMany([
+          { id: "1", value: { id: "1", name: "a" } },
+          { id: "2", value: { id: "2", name: "b" } },
+        ]),
+      ).resolves.toBeUndefined();
+    }
+  });
+});
 
 describe("provideDocumentIndex", () => {
   it("defaults to the noop provider", async () => {

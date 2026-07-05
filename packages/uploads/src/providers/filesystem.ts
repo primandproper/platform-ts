@@ -1,11 +1,13 @@
-import { createReadStream } from "node:fs";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 import { BlobNotFoundError, SigningUnsupportedError, type Bucket } from "../bucket.js";
 import type { Attributes, ObjectInfo } from "../capabilities.js";
-import { toBytes, type BlobBody } from "../stream.js";
+import { bytesToStream, type BlobBody } from "../stream.js";
 import type { SaveOptions } from "../uploads.js";
 
 /** Suffix of the sidecar file that carries an object's metadata, mirroring gocloud's `fileblob`. */
@@ -35,7 +37,19 @@ export class FilesystemBucket implements Bucket {
   async write(key: string, body: BlobBody, opts?: SaveOptions): Promise<void> {
     const path = this.#pathFor(key);
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, await toBytes(body));
+
+    // Write to a temp sibling then atomically rename into place, so a crash mid-write never leaves
+    // a partial/corrupt object at `path` (gocloud fileblob semantics). Stream the body so a large
+    // payload isn't buffered whole. On any failure the temp file is cleaned up.
+    const tmp = `${path}.${randomUUID()}.tmp`;
+    const source = body instanceof Uint8Array ? bytesToStream(body) : body;
+    try {
+      await pipeline(Readable.fromWeb(source), createWriteStream(tmp));
+      await rename(tmp, path);
+    } catch (err) {
+      await rm(tmp, { force: true });
+      throw err;
+    }
 
     const attrs: SidecarAttrs = {
       contentType: opts?.contentType,

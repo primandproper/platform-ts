@@ -9,12 +9,16 @@ export class NoopDistributedLock implements DistributedLock {
   acquire(key: string): Promise<Lock | undefined> {
     return Promise.resolve({
       key,
-      release: () => Promise.resolve(),
-      refresh: () => Promise.resolve(),
+      release: () => Promise.resolve(true),
+      refresh: () => Promise.resolve(true),
     });
   }
 
   ping(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  close(): Promise<void> {
     return Promise.resolve();
   }
 }

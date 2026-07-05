@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { provideQRCodes } from "./index.js";
+import { provideQRCodes, QRCodeError } from "./index.js";
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47];
 const OTPAUTH_URI =
@@ -38,5 +38,16 @@ describe("provideQRCodes", () => {
       width: 512,
     });
     expect(url.startsWith("data:image/png;base64,")).toBe(true);
+  });
+
+  it("wraps a library render failure in a typed QRCodeError", async () => {
+    // A payload far beyond QR capacity makes the `qrcode` library throw; the wrapper must
+    // surface it as a typed error carrying the original as `cause`, not a raw vendor error.
+    const tooBig = "x".repeat(10000);
+    await expect(generator.toDataUrl(tooBig)).rejects.toBeInstanceOf(QRCodeError);
+    await expect(generator.toSvg(tooBig)).rejects.toBeInstanceOf(QRCodeError);
+    await expect(generator.toBuffer(tooBig)).rejects.toSatisfy(
+      (err: unknown) => err instanceof QRCodeError && err.cause !== undefined,
+    );
   });
 });

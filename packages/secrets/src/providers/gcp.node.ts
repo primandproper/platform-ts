@@ -18,6 +18,9 @@ const sourceName = "gcp_secret_source";
 const SECRET_VERSION_LATEST = "latest";
 const PROJECTS_PREFIX = "projects/";
 
+/** Sentinel name probed by {@link GCPSecretSource.ping}; a NOT_FOUND still proves reachability. */
+const PING_PROBE_NAME = "__platform_ping_probe__";
+
 /** gRPC status code for NOT_FOUND, the shape the Secret Manager client throws on a missing version. */
 const GRPC_NOT_FOUND = 5;
 
@@ -107,9 +110,21 @@ export class GCPSecretSource implements SecretSource {
     return getRequired(this, key);
   }
 
-  // Secret Manager exposes no cheap reachability check; a real client is assumed live via ADC.
+  /**
+   * Probes reachability + credentials by accessing a sentinel secret version. Secret Manager has
+   * no dedicated health endpoint, but a NOT_FOUND resolves to `undefined` (proving the endpoint is
+   * reachable and ADC worked) while an auth/network failure throws — so a broken config fails here
+   * rather than silently on the first real `get`.
+   */
   ping(): Promise<void> {
-    return Promise.resolve();
+    return this.#observer.run("ping", async (op) => {
+      op.set(PROJECT_ID_KEY, this.#projectID);
+      try {
+        await this.#client.access(this.#resolveName(PING_PROBE_NAME));
+      } catch (err) {
+        throw op.error(err, "pinging gcp secret manager");
+      }
+    });
   }
 
   close(): Promise<void> {

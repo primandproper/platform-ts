@@ -1,8 +1,12 @@
-import type { TextHit, TextIndex } from "../text.js";
+import type { BulkTextIndex, TextHit } from "../text.js";
 
 /** A {@link TextIndex} that indexes nothing; every search is empty. */
-export class NoopTextIndex implements TextIndex {
+export class NoopTextIndex implements BulkTextIndex {
   index(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  indexMany(): Promise<void> {
     return Promise.resolve();
   }
 

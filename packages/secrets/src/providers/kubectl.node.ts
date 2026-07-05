@@ -17,6 +17,9 @@ import {
 
 const sourceName = "kubectl_secret_source";
 
+/** Sentinel secret name probed by {@link KubectlSecretSource.ping}; a 404 still proves reachability. */
+const PING_PROBE_NAME = "__platform-ping-probe__";
+
 /**
  * Minimal Kubernetes secrets seam — the analogue of Go's `SecretGetter`. `read` returns the
  * secret's decoded (base64 → utf8) data map, or `undefined` if the secret does not exist so a
@@ -133,8 +136,20 @@ export class KubectlSecretSource implements SecretSource {
     return getRequired(this, key);
   }
 
+  /**
+   * Probes reachability + credentials by reading a sentinel secret. A 404 resolves to `undefined`
+   * (proving the API server is reachable and the kubeconfig/in-cluster credentials work) while an
+   * auth/network failure throws — so a broken config fails here rather than on the first real `get`.
+   */
   ping(): Promise<void> {
-    return Promise.resolve();
+    return this.#observer.run("ping", async (op) => {
+      op.set(SECRET_NAME_KEY, PING_PROBE_NAME);
+      try {
+        await this.#client.read(PING_PROBE_NAME);
+      } catch (err) {
+        throw op.error(err, "pinging kubernetes api");
+      }
+    });
   }
 
   close(): Promise<void> {

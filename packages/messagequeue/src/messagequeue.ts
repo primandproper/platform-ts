@@ -24,8 +24,11 @@ export interface Publisher {
    * analogue of Go's `PublishAsync(ctx, data any)`.
    */
   publishAsync(data: unknown): void;
-  /** Halts all publishing and releases any per-publisher resources. Go's `Stop()`. */
-  stop(): void;
+  /**
+   * Halts all publishing and releases any per-publisher resources, awaiting any pending flush so
+   * buffered messages are not dropped on shutdown. Go's `Stop()`, made awaitable.
+   */
+  stop(): Promise<void>;
 }
 
 /**
@@ -40,8 +43,11 @@ export interface PublisherProvider {
   providePublisher(topic: string): Promise<Publisher>;
   /** Verifies the backing broker is reachable. Go's `Ping(ctx) error`. */
   ping(): Promise<void>;
-  /** Closes the underlying client and every cached publisher. Go's `Close()`. */
-  close(): void;
+  /**
+   * Closes the underlying client and every cached publisher, awaiting any in-flight flush so
+   * buffered messages are not dropped on shutdown. Go's `Close()`, made awaitable.
+   */
+  close(): Promise<void>;
 }
 
 /**
@@ -70,10 +76,26 @@ export interface ConsumerProvider {
    * {@link ErrEmptyTopicName} when `topic` is empty.
    */
   provideConsumer(topic: string, handler: ConsumerFunc): Promise<Consumer>;
+  /**
+   * Closes the underlying client and disconnects every cached consumer so consumer-side broker
+   * connections (SQS/Pub/Sub clients, Kafka readers, Redis subscriber sockets) are released on
+   * shutdown rather than leaking. Idempotent — safe to call more than once.
+   */
+  close(): Promise<void>;
 }
 
 /** Returned when a topic name is empty. Mirrors Go's `ErrEmptyTopicName`. */
 export const ErrEmptyTopicName = new PlatformError(
   "messagequeue/empty-topic-name",
   "empty topic name",
+);
+
+/**
+ * Rejected when `provideConsumer` is called again for a topic that already has a consumer bound
+ * to a *different* handler. The per-topic consumer cache would otherwise silently return the
+ * first handler's consumer and drop the second, so the mismatch is surfaced instead.
+ */
+export const ErrConsumerHandlerMismatch = new PlatformError(
+  "messagequeue/consumer-handler-mismatch",
+  "a consumer for this topic already exists with a different handler",
 );

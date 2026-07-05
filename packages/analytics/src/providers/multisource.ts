@@ -30,6 +30,10 @@ export const SOURCE_PROPERTY_KEY = "source";
 export class MultiSourceReporter {
   readonly #reporters: Record<string, EventReporter>;
   readonly #logger: Logger;
+  // A single shared noop and a set of already-warned sources: an unknown source is a config
+  // mistake that repeats on every call, so warn once per source and never allocate per call.
+  readonly #noop = new NoopReporter();
+  readonly #warnedSources = new Set<string>();
 
   constructor(reporters: Record<string, EventReporter>, deps: ObservabilityDeps = {}) {
     this.#reporters = reporters;
@@ -88,10 +92,14 @@ export class MultiSourceReporter {
     if (reporter) {
       return reporter;
     }
-    this.#logger
-      .with({ source, knownSources: Object.keys(this.#reporters) })
-      .warn("no analytics reporter configured for source, using noop");
-    return new NoopReporter();
+    if (!this.#warnedSources.has(source)) {
+      this.#warnedSources.add(source);
+      this.#logger.warn("no analytics reporter configured for source, using noop", {
+        source,
+        knownSources: Object.keys(this.#reporters),
+      });
+    }
+    return this.#noop;
   }
 
   #withSource(source: string, properties: EventProperties | undefined): EventProperties {

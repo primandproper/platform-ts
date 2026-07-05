@@ -8,6 +8,7 @@ import type {
 
 import { MetricsConfigSchema, type MetricsConfigInput } from "./config.js";
 import {
+  defaultMeterProvider,
   type MeterProvider,
   noopMeterProvider,
   type ObservabilityDeps,
@@ -34,12 +35,12 @@ export interface Metrics {
 
 /**
  * Builds a {@link Metrics} facade over the given meter provider. Defaults to the
- * {@link noopMeterProvider}, so instruments are always safe to create and record even with
- * no SDK registered.
+ * {@link defaultMeterProvider}, so instruments are always safe to create and record — a no-op
+ * until an SDK is registered, then live.
  */
 export function makeMetrics(
   name: string,
-  provider: MeterProvider = noopMeterProvider,
+  provider: MeterProvider = defaultMeterProvider,
 ): Metrics {
   const meter = provider.getMeter(name);
   return {
@@ -54,8 +55,9 @@ export function makeMetrics(
 
 /**
  * Provider factory mirroring the Go platform's `Provide*` and the other packages'
- * `provide*`. Both `noop` and `otel` resolve to the global OTel meter provider — a no-op
- * until an SDK is registered — unless an explicit provider is injected via `deps.metrics`.
+ * `provide*`. `provider: "otel"` (the default) resolves to the injected provider, or the
+ * globally-registered OTel meter provider (a no-op until an SDK is registered). `provider:
+ * "noop"` forces a genuinely inert meter, ignoring any injected or global provider.
  *
  * To wire a real backend on Node, register an SDK provider once at startup and either set it
  * global or inject it here:
@@ -65,7 +67,7 @@ export function makeMetrics(
  * import { metrics } from "@opentelemetry/api";
  *
  * const sdk = new MeterProvider({ readers: [...] });
- * metrics.setGlobalMeterProvider(sdk);          // picked up by the noop fallback, or
+ * metrics.setGlobalMeterProvider(sdk);          // picked up by the otel default, or
  * provideMeterProvider({ provider: "otel" }, { metrics: sdk }); // inject explicitly
  * ```
  *
@@ -76,6 +78,9 @@ export function provideMeterProvider(
   config?: MetricsConfigInput,
   deps?: ObservabilityDeps,
 ): MeterProvider {
-  MetricsConfigSchema.parse(config ?? {});
-  return deps?.metrics ?? noopMeterProvider;
+  const cfg = MetricsConfigSchema.parse(config ?? {});
+  if (cfg.provider === "noop") {
+    return noopMeterProvider;
+  }
+  return deps?.metrics ?? defaultMeterProvider;
 }

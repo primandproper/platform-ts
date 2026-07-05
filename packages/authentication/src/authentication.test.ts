@@ -1,5 +1,15 @@
+import {
+  type LogValues,
+  type Logger,
+  type MeterProvider,
+} from "@primandproper/observability";
 import { describe, expect, it } from "vitest";
 
+import {
+  InvalidScryptCostError,
+  InvalidTOTPSecretError,
+  InvalidTokenLengthError,
+} from "./errors.js";
 import { ScryptHasher } from "./providers/scrypt.js";
 import { RandomTokenGenerator } from "./providers/tokens.js";
 import { RFC6238TOTP } from "./providers/totp.js";
@@ -41,6 +51,20 @@ describe("ScryptHasher", () => {
 
   it("is constructed by providePasswordHasher with the scrypt default", () => {
     expect(providePasswordHasher()).toBeInstanceOf(ScryptHasher);
+  });
+
+  it("rejects a non-power-of-two cost at construction", () => {
+    expect(() => new ScryptHasher({ cost: 1000 })).toThrow(InvalidScryptCostError);
+    expect(() => providePasswordHasher({ scrypt: { cost: 1000 } })).toThrow();
+  });
+
+  it("treats a hash with an out-of-range cost as malformed instead of allocating for it", async () => {
+    const hasher = make();
+    // N = 2^30 would drive scrypt to allocate gigabytes; verify must reject it fast, not attempt it.
+    const salt = Buffer.from("salt").toString("base64");
+    const key = Buffer.alloc(32, 1).toString("base64");
+    const hostile = `scrypt$N=1073741824,r=8,p=1$${salt}$${key}`;
+    expect(await hasher.verify("anything", hostile)).toBe(false);
   });
 });
 
@@ -90,6 +114,19 @@ describe("RFC6238TOTP", () => {
   it("is constructed by provideTOTP", () => {
     expect(provideTOTP()).toBeInstanceOf(RFC6238TOTP);
   });
+
+  it("throws a typed error on an invalid secret without leaking a secret character", () => {
+    const totp = new RFC6238TOTP();
+    const secret = "abc!def"; // '!' is not in the base32 alphabet
+    let thrown: unknown;
+    try {
+      totp.generate(secret);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(InvalidTOTPSecretError);
+    expect((thrown as Error).message).not.toContain("!");
+  });
 });
 
 describe("RandomTokenGenerator", () => {
@@ -112,7 +149,132 @@ describe("RandomTokenGenerator", () => {
   it("is constructed by provideTokenGenerator", () => {
     expect(provideTokenGenerator().generate()).toMatch(/^[A-Za-z0-9_-]+$/u);
   });
+
+  it("rejects a non-positive byte length", () => {
+    const tokens = new RandomTokenGenerator();
+    expect(() => tokens.generate(0)).toThrow(InvalidTokenLengthError);
+    expect(() => tokens.generate(-8)).toThrow(InvalidTokenLengthError);
+    expect(() => tokens.generate(1.5)).toThrow(InvalidTokenLengthError);
+  });
 });
+
+describe("ScryptHasher instrumentation", () => {
+  const make = (deps: { logger: Logger; metrics: MeterProvider }): ScryptHasher =>
+    new ScryptHasher(
+      { cost: 1024, blockSize: 8, parallelization: 1, keyLength: 32 },
+      deps,
+    );
+
+  it("counts a successful verification and logs it at debug", async () => {
+    const { logger, debugs } = recordingLogger();
+    const { provider, counts } = recordingMeter();
+    const hasher = make({ logger, metrics: provider });
+
+    const encoded = await hasher.hash("correct horse battery staple");
+    expect(await hasher.verify("correct horse battery staple", encoded)).toBe(true);
+
+    expect(counts["authentication.password.verifications:success"]).toBe(1);
+    expect(counts["authentication.password.verifications:failure"] ?? 0).toBe(0);
+    expect(debugs.some((d) => d.message === "password verification success")).toBe(true);
+  });
+
+  it("counts a failed verification, logs it at debug, and never logs the password", async () => {
+    const { logger, debugs } = recordingLogger();
+    const { provider, counts } = recordingMeter();
+    const hasher = make({ logger, metrics: provider });
+
+    const encoded = await hasher.hash("correct horse battery staple");
+    expect(await hasher.verify("Tr0ub4dor&3", encoded)).toBe(false);
+
+    expect(counts["authentication.password.verifications:failure"]).toBe(1);
+    expect(counts["authentication.password.verifications:success"] ?? 0).toBe(0);
+    expect(debugs.some((d) => d.message === "password verification failure")).toBe(true);
+    expect(loggedText(debugs)).not.toContain("Tr0ub4dor&3");
+    expect(loggedText(debugs)).not.toContain(encoded);
+  });
+});
+
+describe("RFC6238TOTP instrumentation", () => {
+  const atMs = 1_700_000_000_000;
+
+  it("counts a successful verification and logs it at debug", () => {
+    const { logger, debugs } = recordingLogger();
+    const { provider, counts } = recordingMeter();
+    const totp = new RFC6238TOTP({}, { logger, metrics: provider });
+
+    const secret = totp.generateSecret();
+    const code = totp.generate(secret, atMs);
+    expect(totp.verify(secret, code, { atMs, window: 0 })).toBe(true);
+
+    expect(counts["authentication.totp.verifications:success"]).toBe(1);
+    expect(counts["authentication.totp.verifications:failure"] ?? 0).toBe(0);
+    expect(debugs.some((d) => d.message === "TOTP verification success")).toBe(true);
+  });
+
+  it("counts a failed verification, logs it at debug, and never logs the secret or code", () => {
+    const { logger, debugs } = recordingLogger();
+    const { provider, counts } = recordingMeter();
+    const totp = new RFC6238TOTP({}, { logger, metrics: provider });
+
+    const secret = totp.generateSecret();
+    const code = totp.generate(secret, atMs);
+    expect(totp.verify(secret, "000000", { atMs, window: 0 })).toBe(false);
+
+    expect(counts["authentication.totp.verifications:failure"]).toBe(1);
+    expect(counts["authentication.totp.verifications:success"] ?? 0).toBe(0);
+    expect(debugs.some((d) => d.message === "TOTP verification failure")).toBe(true);
+    expect(loggedText(debugs)).not.toContain(secret);
+    expect(loggedText(debugs)).not.toContain(code);
+  });
+});
+
+interface DebugLine {
+  message: string;
+  values: LogValues;
+}
+
+/** A logger that records debug lines with every value `with`/`child`/`withSpan` has accumulated. */
+function recordingLogger(): { logger: Logger; debugs: DebugLine[] } {
+  const debugs: DebugLine[] = [];
+  const make = (bound: LogValues): Logger => ({
+    debug: (message, values) => {
+      debugs.push({ message, values: { ...bound, ...values } });
+    },
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    with: (values) => make({ ...bound, ...values }),
+    child: () => make(bound),
+    withSpan: () => make(bound),
+  });
+  return { logger: make({}), debugs };
+}
+
+/** Every debug line flattened to text, so a test can assert a secret never appears in any of them. */
+function loggedText(debugs: DebugLine[]): string {
+  return debugs.map((d) => `${d.message} ${JSON.stringify(d.values)}`).join("\n");
+}
+
+/** A meter provider that tallies counter `add`s by `${instrument}:${outcome}`. */
+function recordingMeter(): { provider: MeterProvider; counts: Record<string, number> } {
+  const counts: Record<string, number> = {};
+  const counter = (name: string) => ({
+    add: (value: number, attributes?: { outcome?: string }) => {
+      const key = `${name}:${attributes?.outcome ?? ""}`;
+      counts[key] = (counts[key] ?? 0) + value;
+    },
+  });
+  const meter = {
+    createCounter: (name: string) => counter(name),
+    createUpDownCounter: (name: string) => counter(name),
+    createHistogram: () => ({ record: () => undefined }),
+    createGauge: () => ({ record: () => undefined }),
+  };
+  return {
+    provider: { getMeter: () => meter } as unknown as MeterProvider,
+    counts,
+  };
+}
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 

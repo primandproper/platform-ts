@@ -12,6 +12,8 @@ import {
   ContentTypeXML,
   ContentTypeYAML,
   EncodingError,
+  RequestBodyTooLargeError,
+  UnsupportedContentTypeError,
   contentTypeFromString,
   decode,
   decodeJSON,
@@ -60,6 +62,26 @@ describe("JsonCodec", () => {
     const codec = new JsonCodec();
     expect(codec.decode(codec.encode([1, 2, 3]))).toStrictEqual([1, 2, 3]);
     expect(codec.decode(codec.encode("scalar"))).toBe("scalar");
+  });
+});
+
+// ENC-1: the XML parser is lenient; decode must reject non-XML instead of fabricating an object.
+describe("XmlCodec malformed input", () => {
+  const enc = new TextEncoder();
+
+  it("throws on non-XML instead of returning {}", () => {
+    const codec = new XmlCodec();
+    expect(() => codec.decode(enc.encode("this is not xml"))).toThrow();
+  });
+
+  it("throws on mismatched tags", () => {
+    const codec = new XmlCodec();
+    expect(() => codec.decode(enc.encode("<a><b></a></b>"))).toThrow();
+  });
+
+  it("surfaces as an EncodingError through the manager", () => {
+    const encoder = provideEncoder({ contentType: ContentTypeXML });
+    expect(() => encoder.decode(enc.encode("this is not xml"))).toThrow(EncodingError);
   });
 });
 
@@ -124,6 +146,62 @@ describe("ServerEncoderDecoder", () => {
   it("always encodes JSON via encodeJSON regardless of configured type", () => {
     const sed = provideServerEncoderDecoder({ contentType: ContentTypeYAML });
     expect(decoder.decode(sed.encodeJSON({ a: 1 }))).toBe('{"a":1}');
+  });
+
+  it("rejects a request body over maxRequestBytes as it streams (no Content-Length trust)", async () => {
+    const sed = provideServerEncoderDecoder({ maxRequestBytes: 8 });
+    const req = new Request("http://example.test/", {
+      method: "POST",
+      headers: { "content-type": ContentTypeJSON },
+      body: JSON.stringify({ a: "much longer than eight bytes" }),
+    });
+    await expect(sed.decodeRequest(req)).rejects.toBeInstanceOf(RequestBodyTooLargeError);
+  });
+
+  it("rejects a request whose declared Content-Length exceeds the cap early", async () => {
+    const sed = provideServerEncoderDecoder({ maxRequestBytes: 4 });
+    const req = new Request("http://example.test/", {
+      method: "POST",
+      headers: { "content-type": ContentTypeJSON, "content-length": "1000000" },
+      body: JSON.stringify({ a: 1 }),
+    });
+    await expect(sed.decodeRequest(req)).rejects.toBeInstanceOf(RequestBodyTooLargeError);
+  });
+
+  it("accepts a body within the cap", async () => {
+    const sed = provideServerEncoderDecoder({ maxRequestBytes: 1024 });
+    const req = new Request("http://example.test/", {
+      method: "POST",
+      headers: { "content-type": ContentTypeJSON },
+      body: JSON.stringify({ ok: true }),
+    });
+    expect(await sed.decodeRequest(req)).toStrictEqual({ ok: true });
+  });
+
+  it("rejects a content type outside the allow-list", async () => {
+    const sed = provideServerEncoderDecoder({
+      allowedContentTypes: [ContentTypeJSON],
+    });
+    const req = new Request("http://example.test/", {
+      method: "POST",
+      headers: { "content-type": ContentTypeYAML },
+      body: "a: 1\n",
+    });
+    await expect(sed.decodeRequest(req)).rejects.toBeInstanceOf(
+      UnsupportedContentTypeError,
+    );
+  });
+
+  it("allows a permitted content type through the allow-list", async () => {
+    const sed = provideServerEncoderDecoder({
+      allowedContentTypes: [ContentTypeJSON, ContentTypeYAML],
+    });
+    const req = new Request("http://example.test/", {
+      method: "POST",
+      headers: { "content-type": ContentTypeYAML },
+      body: "a: 1\n",
+    });
+    expect(await sed.decodeRequest(req)).toStrictEqual({ a: 1 });
   });
 });
 

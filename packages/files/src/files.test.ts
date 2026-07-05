@@ -1,7 +1,8 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { makeRecordingObserver } from "@primandproper/observability";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -10,6 +11,7 @@ import {
   Files,
   NonPositiveChunkSizeError,
   OffsetBeyondEofError,
+  PathEscapesBaseError,
   allLines,
   chunkLines,
   decodeFile,
@@ -139,5 +141,31 @@ describe("file operations", () => {
     expect(handle.path()).toBe(dir);
     expect(await handle.allLines("lines.txt")).toHaveLength(5);
     await expect(handle.decode("data.json")).resolves.toStrictEqual({ a: 1, b: "two" });
+  });
+
+  it("rejects a name that escapes the base directory", async () => {
+    const handle = await Dir.open(dir);
+    expect(() => handle.resolve("../escape.txt")).toThrow(PathEscapesBaseError);
+    expect(() => handle.resolve("nested/../../escape.txt")).toThrow(PathEscapesBaseError);
+    // every method routes through resolve(), so it is guarded too (fails fast).
+    expect(() => handle.allLines("../escape.txt")).toThrow(PathEscapesBaseError);
+    // a name that stays within the base still resolves.
+    expect(handle.resolve("lines.txt")).toBe(join(dir, "lines.txt"));
+  });
+
+  it("shares the parent's observability with a sub() handle", async () => {
+    const sub = join(dir, "nested");
+    await mkdir(sub);
+    await writeFile(join(sub, "data.json"), JSON.stringify({ ok: true }));
+
+    const observer = makeRecordingObserver();
+    const parent = await Dir.open(dir, { observer });
+    const child = await parent.sub("nested");
+    await child.decode("data.json");
+
+    // sub() reuses the parent's Files (and thus its observer); on the old behavior the child
+    // built a fresh, deps-free Files and this observation would never land.
+    expect(observer.observed("file.path")).toBe(true);
+    expect(String(observer.data()["file.path"])).toContain("data.json");
   });
 });

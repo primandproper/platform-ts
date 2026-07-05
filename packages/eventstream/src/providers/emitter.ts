@@ -1,3 +1,5 @@
+import { noopLogger, type Logger } from "@primandproper/observability";
+
 import type {
   ErrorHandler,
   EventStream,
@@ -20,7 +22,23 @@ export abstract class EventStreamEmitter implements EventStream {
   readonly #openHandlers = new Set<LifecycleHandler>();
   readonly #errorHandlers = new Set<ErrorHandler>();
   readonly #closeHandlers = new Set<LifecycleHandler>();
+  readonly #heartbeatTimeoutMs: number;
+  readonly #logger: Logger;
+  #heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
   #state: StreamState = "closed";
+
+  /**
+   * @param heartbeatTimeoutMs When > 0, a liveness deadline: the connection is declared dead if no
+   *   message arrives within this window (a half-open TCP otherwise reads "open" forever). The
+   *   timer arms on open and resets on every message; on expiry {@link onHeartbeatTimeout} fires.
+   *   `0` (the default) disables it — appropriate when the stream is legitimately idle for long
+   *   stretches and no server heartbeat bounds the gap.
+   * @param logger Used to record a subscriber throw; defaults to the noop logger.
+   */
+  constructor(heartbeatTimeoutMs = 0, logger: Logger = noopLogger) {
+    this.#heartbeatTimeoutMs = heartbeatTimeoutMs;
+    this.#logger = logger;
+  }
 
   get state(): StreamState {
     return this.#state;
@@ -82,9 +100,22 @@ export abstract class EventStreamEmitter implements EventStream {
       return;
     }
     this.#state = "closed";
+    this.#clearHeartbeat();
     this.closeTransport();
     for (const handler of this.#closeHandlers) {
+      this.#safe(handler);
+    }
+  }
+
+  /**
+   * Invokes a subscriber, isolating its throw so one bad handler can't break dispatch for the
+   * others, and logging the throw rather than letting it escape.
+   */
+  #safe(handler: () => void): void {
+    try {
       handler();
+    } catch (err) {
+      this.#logger.error("event stream subscriber threw", err);
     }
   }
 
@@ -100,30 +131,76 @@ export abstract class EventStreamEmitter implements EventStream {
       return;
     }
     this.#state = "open";
+    this.#armHeartbeat();
     for (const handler of this.#openHandlers) {
-      handler();
+      this.#safe(handler);
     }
   }
 
   /** Fans a delivered message out to the catch-all and matching per-event handlers. */
   protected dispatchMessage(message: StreamMessage): void {
+    this.#armHeartbeat(); // any inbound message is proof of life; reset the liveness deadline
     for (const handler of this.#messageHandlers) {
-      handler(message);
+      this.#safe(() => {
+        handler(message);
+      });
     }
     if (message.event !== undefined) {
       const handlers = this.#eventHandlers.get(message.event);
       if (handlers !== undefined) {
         for (const handler of handlers) {
-          handler(message);
+          this.#safe(() => {
+            handler(message);
+          });
         }
       }
     }
   }
 
+  /**
+   * Reflects the transport dropping and re-establishing: `open` → `connecting`. A no-op once
+   * `closed`, so a reconnect signal can never resurrect a deliberately closed stream.
+   */
+  protected dispatchReconnecting(): void {
+    if (this.#state === "open") {
+      this.#state = "connecting";
+    }
+    this.#clearHeartbeat(); // re-armed when the next open lands
+  }
+
+  /** Arms/resets the liveness deadline. No-op when heartbeats are disabled. */
+  #armHeartbeat(): void {
+    if (this.#heartbeatTimeoutMs <= 0) {
+      return;
+    }
+    this.#clearHeartbeat();
+    this.#heartbeatTimer = setTimeout(() => {
+      this.#heartbeatTimer = undefined;
+      this.onHeartbeatTimeout();
+    }, this.#heartbeatTimeoutMs);
+  }
+
+  #clearHeartbeat(): void {
+    if (this.#heartbeatTimer !== undefined) {
+      clearTimeout(this.#heartbeatTimer);
+      this.#heartbeatTimer = undefined;
+    }
+  }
+
+  /**
+   * Called when the liveness deadline lapses with no inbound message. Subclasses react by tearing
+   * the (presumed half-open) connection down and reconnecting. No-op by default.
+   */
+  protected onHeartbeatTimeout(): void {
+    // Overridden by transports that carry a logger and reconnect machinery.
+  }
+
   /** Fans a transport error out to {@link onError} handlers. */
   protected dispatchError(err: unknown): void {
     for (const handler of this.#errorHandlers) {
-      handler(err);
+      this.#safe(() => {
+        handler(err);
+      });
     }
   }
 }

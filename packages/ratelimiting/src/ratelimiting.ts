@@ -29,4 +29,23 @@ export interface RateLimiter {
   limit(key: string, cost?: number): Promise<RateLimitResult>;
   /** Clears any accumulated usage for `key`, restoring full capacity. */
   reset(key: string): Promise<void>;
+  /**
+   * Releases any resources the limiter holds (e.g. a Redis connection) so the process can exit
+   * gracefully. Providers that hold nothing resolve immediately; providers handed a shared client
+   * leave it open for its owner. Idempotent — safe to call more than once.
+   */
+  close(): Promise<void>;
+}
+
+/**
+ * Guards the `cost` argument shared by every provider. A negative cost would *mint* capacity
+ * (memory subtracts it; redis `INCRBY`s a negative), so reject anything but a non-negative
+ * integer up front.
+ */
+export function assertValidCost(cost: number): void {
+  if (!Number.isInteger(cost) || cost < 0) {
+    throw new TypeError(
+      `rate limit cost must be a non-negative integer, got ${String(cost)}`,
+    );
+  }
 }

@@ -1,4 +1,8 @@
-import type { ObservabilityDeps } from "@primandproper/observability";
+import {
+  makeMetrics,
+  makeObserver,
+  type ObservabilityDeps,
+} from "@primandproper/observability";
 
 import type { EventReporter } from "./analytics.js";
 import { AnalyticsConfigSchema, type AnalyticsConfigInput } from "./config.js";
@@ -54,11 +58,22 @@ export function provideMultiSourceAnalytics(
   sources: Record<string, AnalyticsConfigInput>,
   deps?: ObservabilityDeps,
 ): MultiSourceReporter {
+  const logger = makeObserver("analytics", deps).logger();
+  const degraded = makeMetrics("analytics", deps?.metrics).counter(
+    "analytics.source.degraded",
+    { description: "Analytics sources that failed to construct and fell back to noop" },
+  );
   const reporters: Record<string, EventReporter> = {};
   for (const [source, config] of Object.entries(sources)) {
     try {
       reporters[source] = provideAnalytics(config, deps);
-    } catch {
+    } catch (err) {
+      // A misconfigured source (bad write key, invalid config) must not silently vanish — log the
+      // cause with the source name and count the degrade so a caller can alert on it.
+      logger.error("analytics source failed to construct; falling back to noop", err, {
+        source,
+      });
+      degraded.add(1, { source });
       reporters[source] = new NoopReporter();
     }
   }

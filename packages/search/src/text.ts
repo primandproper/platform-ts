@@ -14,7 +14,10 @@ export interface TextHit {
 
 /** Options for {@link TextIndex.search}. */
 export interface TextSearchOptions {
-  /** Maximum number of hits to return. Unbounded when omitted. */
+  /**
+   * Maximum number of hits to return. Defaults to `DEFAULT_SEARCH_LIMIT` (from `document-index`)
+   * when omitted — an explicit, uniform page size rather than each backend's silent default.
+   */
   limit?: number;
 }
 
@@ -31,4 +34,19 @@ export interface TextIndex {
   delete(id: string): Promise<void>;
   /** Verifies the backing store is reachable. */
   ping(): Promise<void>;
+}
+
+/**
+ * A {@link TextIndex} that can index many documents in one backend round trip (Typesense
+ * `import`) rather than N sequential `index()` calls. Not every index supports it, so obtain one
+ * via {@link isBulkTextIndex}.
+ */
+export interface BulkTextIndex extends TextIndex {
+  /** Indexes (or replaces) every document in a single batched operation. */
+  indexMany(docs: readonly TextDocument[]): Promise<void>;
+}
+
+/** Narrows a {@link TextIndex} to a {@link BulkTextIndex} when the provider supports batching. */
+export function isBulkTextIndex(index: TextIndex): index is BulkTextIndex {
+  return typeof (index as Partial<BulkTextIndex>).indexMany === "function";
 }

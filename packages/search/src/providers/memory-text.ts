@@ -5,7 +5,8 @@ import {
   type Observer,
 } from "@primandproper/observability";
 
-import type { TextDocument, TextHit, TextIndex, TextSearchOptions } from "../text.js";
+import { DEFAULT_SEARCH_LIMIT } from "../document-index.js";
+import type { BulkTextIndex, TextDocument, TextHit, TextSearchOptions } from "../text.js";
 
 const o11yName = "search";
 
@@ -34,7 +35,7 @@ function termFrequencies(tokens: string[]): Map<string, number> {
  * frequency — genuinely usable for small datasets and tests, not a production search engine.
  * The default text provider.
  */
-export class MemoryTextIndex implements TextIndex {
+export class MemoryTextIndex implements BulkTextIndex {
   readonly #docs = new Map<string, StoredTextDocument>();
   readonly #observer: Observer;
   readonly #logger: Logger;
@@ -45,13 +46,24 @@ export class MemoryTextIndex implements TextIndex {
   }
 
   index(doc: TextDocument): Promise<void> {
+    this.#store(doc);
+    return Promise.resolve();
+  }
+
+  indexMany(docs: readonly TextDocument[]): Promise<void> {
+    for (const doc of docs) {
+      this.#store(doc);
+    }
+    return Promise.resolve();
+  }
+
+  #store(doc: TextDocument): void {
     const stored: StoredTextDocument = {
       text: doc.text,
       terms: termFrequencies(tokenize(doc.text)),
       ...(doc.metadata !== undefined ? { metadata: doc.metadata } : {}),
     };
     this.#docs.set(doc.id, stored);
-    return Promise.resolve();
   }
 
   search(query: string, opts: TextSearchOptions = {}): Promise<TextHit[]> {
@@ -78,8 +90,8 @@ export class MemoryTextIndex implements TextIndex {
 
     hits.sort((a, b) => b.score - a.score);
 
-    const limit = opts.limit;
-    return Promise.resolve(limit !== undefined ? hits.slice(0, limit) : hits);
+    const limit = opts.limit ?? DEFAULT_SEARCH_LIMIT;
+    return Promise.resolve(hits.slice(0, limit));
   }
 
   delete(id: string): Promise<void> {

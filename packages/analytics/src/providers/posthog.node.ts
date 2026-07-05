@@ -4,10 +4,10 @@ import { PostHog } from "posthog-node";
 import type { EventContext, EventReporter } from "../analytics.js";
 import type { PostHogConfig } from "../config.js";
 
-import { VendorReporter } from "./vendor.js";
+import { DEFAULT_ANALYTICS_TIMEOUT_MS, VendorReporter } from "./vendor.js";
 
 /** PostHog Cloud host; Go's default. */
-const DEFAULT_HOST = "https://app.posthog.com";
+const DEFAULT_HOST = "https://us.i.posthog.com";
 /** PostHog keys every event to a distinct id; used when the caller supplies neither id. */
 const FALLBACK_DISTINCT_ID = "anonymous";
 
@@ -26,7 +26,7 @@ export function providePostHog(
   deps: ObservabilityDeps = {},
 ): EventReporter {
   const client = new PostHog(config.apiKey, { host: config.host ?? DEFAULT_HOST });
-  return new VendorReporter(
+  const reporter = new VendorReporter(
     "posthog",
     {
       track(event, properties, context) {
@@ -57,8 +57,16 @@ export function providePostHog(
         });
       },
       flush: () => client.flush(),
-      shutdown: () => client.shutdown(),
+      // Pass the deadline into posthog-node so the SDK itself gives up on a stuck flush, rather
+      // than relying only on the reporter-level race to abandon it.
+      shutdown: () => client.shutdown(DEFAULT_ANALYTICS_TIMEOUT_MS),
     },
     deps,
   );
+  // posthog-node delivers batches on a background timer; delivery failures only ever surface on the
+  // client's `error` event, so surface them through the reporter instead of letting them vanish.
+  client.on("error", (err) => {
+    reporter.onBackgroundError(err);
+  });
+  return reporter;
 }

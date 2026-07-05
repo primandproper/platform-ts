@@ -6,7 +6,7 @@ import {
   type Observer,
 } from "@primandproper/observability";
 
-import { base64ToBytes } from "../base64.js";
+import { decodeBase64Key } from "../base64.js";
 import type { Encryptor } from "../encryption.js";
 
 const o11yName = "cryptography";
@@ -28,16 +28,27 @@ export interface Salsa20EncryptorOptions {
  * self-describing. Built on the audited `@noble/ciphers` (isomorphic, no Node built-ins).
  *
  * SECURITY: Salsa20 is a raw stream cipher — unlike {@link AesGcmEncryptor} it is NOT
- * authenticated, so tampering is undetectable and a nonce must never repeat under a given key.
- * Prefer AES-GCM unless you specifically need Salsa20 for interop with the Go platform.
+ * authenticated ({@link authenticated} is `false`), so tampering is **undetectable**: `decrypt`
+ * of a modified ciphertext returns garbage plaintext successfully rather than rejecting. This
+ * deliberately does not satisfy the {@link Encryptor} interface's tamper-rejection promise — that
+ * promise is carved out to authenticated providers. Prefer AES-GCM unless you specifically need
+ * Salsa20 for interop with the Go platform.
+ *
+ * MESSAGE BUDGET: the nonce is a random 64 bits (8 bytes), so by the birthday bound a repeat —
+ * catastrophic for a stream cipher (it leaks the XOR of two plaintexts) — becomes non-negligible
+ * around 2^32 messages under one key. Keep well under that (rotate the key well before ~2^24
+ * messages), or use an AEAD with a larger nonce (XSalsa20/AES-GCM) if you need a bigger budget.
  */
 export class Salsa20Encryptor implements Encryptor {
+  /** Raw Salsa20 has no MAC, so tampering cannot be detected. See the class SECURITY note. */
+  readonly authenticated = false;
+
   readonly #key: Uint8Array;
   readonly #observer: Observer;
   readonly #logger: Logger;
 
   constructor(options: Salsa20EncryptorOptions, deps: ObservabilityDeps = {}) {
-    this.#key = base64ToBytes(options.key);
+    this.#key = decodeBase64Key(options.key);
     if (this.#key.byteLength !== KEY_BYTES) {
       throw new Error(
         `invalid Salsa20 key length: ${String(this.#key.byteLength)} bytes (expected 32)`,

@@ -35,7 +35,7 @@ export function newPusherClient(options: PusherAsyncNotifierOptions): PusherClie
     key: options.key,
     secret: options.secret,
     cluster: options.cluster,
-    useTLS: options.secure ?? false,
+    useTLS: options.secure ?? true,
   });
   return {
     trigger: (channel, eventName, data) => client.trigger(channel, eventName, data),

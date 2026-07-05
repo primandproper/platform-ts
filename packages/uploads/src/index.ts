@@ -23,7 +23,13 @@ export {
   type Bucket,
 } from "./bucket.js";
 export { type BlobBody } from "./stream.js";
-export { Uploader, ErrCircuitBroken } from "./uploader.js";
+export {
+  Uploader,
+  newCircuitBrokenError,
+  CIRCUIT_BROKEN_CODE,
+  newFileTooLargeError,
+  FILE_TOO_LARGE_CODE,
+} from "./uploader.js";
 export { MemoryBucket } from "./providers/memory.js";
 export { FilesystemBucket } from "./providers/filesystem.js";
 export { GCSBucket } from "./providers/gcp.js";

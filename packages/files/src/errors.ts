@@ -39,3 +39,11 @@ export class EmptyInputError extends PlatformError {
     this.name = "EmptyInputError";
   }
 }
+
+/** Thrown when a name resolves outside its {@link Dir} base (e.g. via `..` or an absolute path). */
+export class PathEscapesBaseError extends PlatformError {
+  constructor(name: string) {
+    super("files/path-escapes-base", `name escapes directory base: ${name}`);
+    this.name = "PathEscapesBaseError";
+  }
+}

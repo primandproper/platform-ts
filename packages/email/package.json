@@ -34,6 +34,7 @@
   "dependencies": {
     "@primandproper/errors": "workspace:*",
     "@primandproper/observability": "workspace:*",
+    "@primandproper/retry": "workspace:*",
     "postmark": "4.0.7",
     "zod": "3.25.76"
   }

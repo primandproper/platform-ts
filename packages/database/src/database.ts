@@ -52,6 +52,12 @@ export interface DatabaseClient {
   readonly writePool: QueryablePool;
   /** Pings each distinct pool, retrying per the configured ping settings; `false` if any stays down. */
   isReady(): Promise<boolean>;
+  /**
+   * Fail-fast variant of {@link isReady}: resolves when ready, otherwise rejects with a
+   * {@link DatabaseNotReadyError}. The underlying driver error (auth/host/TLS) is already logged at
+   * error level by the readiness probe. Use this at startup to abort instead of limping on.
+   */
+  ensureReady(): Promise<void>;
   /** Closes each distinct pool. */
   close(): Promise<void>;
   /** The client's notion of "now", injectable for tests. */
@@ -124,15 +130,26 @@ class InstrumentedClient implements DatabaseClient {
     }
   }
 
+  async ensureReady(): Promise<void> {
+    if (!(await this.isReady())) {
+      throw new DatabaseNotReadyError();
+    }
+  }
+
   async #waitForPing(pool: QueryablePool, name: string): Promise<boolean> {
     let attempt = 0;
     for (;;) {
       try {
         await pool.query(this.#pingQuery);
         return true;
-      } catch {
+      } catch (err) {
         if (attempt >= this.#config.maxPingAttempts) {
-          this.#logger.debug(`ping failed for ${name} connection`);
+          // A database that never comes ready is an error, not a debug footnote — and the driver
+          // error (auth failure, wrong host, TLS) is the diagnostic that matters, so surface it.
+          this.#logger.error(`ping failed for ${name} connection`, toError(err), {
+            connection: name,
+            attempts: attempt + 1,
+          });
           return false;
         }
         await this.#sleep(this.#config.pingWaitPeriodMs);
@@ -142,9 +159,24 @@ class InstrumentedClient implements DatabaseClient {
   }
 
   async close(): Promise<void> {
-    await this.readPool.end();
-    if (this.writePool !== this.readPool) {
-      await this.writePool.end();
+    // Drain every distinct pool even if one rejects — a failed read-pool `end()` must not leak the
+    // write pool. Settle all, log each failure with its cause, then surface the failure(s).
+    const pools =
+      this.writePool === this.readPool
+        ? [this.readPool]
+        : [this.readPool, this.writePool];
+    const results = await Promise.allSettled(pools.map((pool) => pool.end()));
+    const failures = results
+      .filter((r): r is PromiseRejectedResult => r.status === "rejected")
+      .map((r) => toError(r.reason));
+    for (const err of failures) {
+      this.#logger.error("closing database pool", err);
+    }
+    const [first, ...rest] = failures;
+    if (first !== undefined) {
+      throw rest.length === 0
+        ? first
+        : new AggregateError(failures, "closing database pools failed");
     }
   }
 

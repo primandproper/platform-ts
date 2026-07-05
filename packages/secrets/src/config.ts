@@ -37,6 +37,18 @@ export const KubectlSecretsConfigSchema = z.object({
 
 export type KubectlSecretsConfig = z.infer<typeof KubectlSecretsConfigSchema>;
 
+/**
+ * Caching config for the remote providers (gcp/ssm/kubectl). Short-TTL memoization plus in-flight
+ * de-duplication in front of the source, so repeated reads don't each round-trip and a provider
+ * blip keeps serving cached values. On by default with a short TTL; `enabled: false` opts out.
+ */
+export const SecretsCacheConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  ttlMs: z.number().int().nonnegative().default(30_000),
+});
+
+export type SecretsCacheConfig = z.infer<typeof SecretsCacheConfigSchema>;
+
 /** Providers whose config block is mandatory — the analogue of Go's per-provider `When(Required)`. */
 const PROVIDERS_REQUIRING_CONFIG = ["static", "gcp", "ssm", "kubectl"] as const;
 
@@ -54,6 +66,7 @@ export const SecretsConfigSchema = z
     gcp: GCPSecretsConfigSchema.optional(),
     ssm: SSMSecretsConfigSchema.optional(),
     kubectl: KubectlSecretsConfigSchema.optional(),
+    cache: SecretsCacheConfigSchema.default({}),
   })
   .superRefine((cfg, ctx) => {
     for (const provider of PROVIDERS_REQUIRING_CONFIG) {

@@ -1,8 +1,30 @@
+import type { Logger, LogValues } from "@primandproper/observability";
 import { describe, expect, it } from "vitest";
 
+import { NodeCookieConfigSchema } from "./config.js";
 import type { CookieStore } from "./cookies.js";
 import { HeaderCookieStore } from "./providers/header.js";
 import { NoopCookieStore } from "./providers/noop.js";
+
+/** A logger that records every warn line, returning itself for `with`/`child`/`withSpan`. */
+class RecordingLogger implements Logger {
+  readonly warns: { message: string; values: LogValues }[] = [];
+  debug(): void {}
+  info(): void {}
+  warn(message: string, values?: LogValues): void {
+    this.warns.push({ message, values: values ?? {} });
+  }
+  error(): void {}
+  with(): Logger {
+    return this;
+  }
+  child(): Logger {
+    return this;
+  }
+  withSpan(): Logger {
+    return this;
+  }
+}
 
 /**
  * Provider-agnostic conformance suite. Running the same assertions against multiple
@@ -100,5 +122,35 @@ describe("HeaderCookieStore", () => {
 
   it("starts with no pending headers", () => {
     expect(new HeaderCookieStore({ header: "a=1" }).headers()).toStrictEqual([]);
+  });
+
+  it("warns (does not throw) when a cookie exceeds the browser size limit", () => {
+    const logger = new RecordingLogger();
+    const store = new HeaderCookieStore({}, { logger });
+    store.set("big", "x".repeat(5000));
+    const warn = logger.warns.find((w) => w.message.includes("size limit"));
+    expect(warn).toBeDefined();
+    expect(warn?.values).toMatchObject({ name: "big" });
+    // it is still queued despite being oversized.
+    expect(store.headers()).toHaveLength(1);
+  });
+
+  it("does not warn for a normally-sized cookie", () => {
+    const logger = new RecordingLogger();
+    const store = new HeaderCookieStore({}, { logger });
+    store.set("small", "value");
+    expect(logger.warns.some((w) => w.message.includes("size limit"))).toBe(false);
+  });
+});
+
+describe("NodeCookieConfigSchema", () => {
+  it("defaults server cookies to HttpOnly", () => {
+    expect(NodeCookieConfigSchema.parse({}).defaults.httpOnly).toBe(true);
+  });
+
+  it("lets a caller opt out of the HttpOnly default", () => {
+    expect(
+      NodeCookieConfigSchema.parse({ defaults: { httpOnly: false } }).defaults.httpOnly,
+    ).toBe(false);
   });
 });

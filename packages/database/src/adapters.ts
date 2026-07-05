@@ -77,13 +77,18 @@ export function sqlitePool(
     db.pragma("foreign_keys = ON");
   }
   return {
-    query(text, params = []): Promise<QueryResult> {
+    // `async` so a synchronous `prepare` throw (invalid SQL) rejects the returned promise rather
+    // than escaping synchronously from this Promise-typed method.
+    async query(text, params = []): Promise<QueryResult> {
       const statement = db.prepare(text);
-      if (statement.reader === false) {
-        const info = statement.run(...params);
-        return Promise.resolve({ rows: [], rowCount: info.changes });
+      // Only a row-returning statement (`reader === true`: SELECT, or `... RETURNING`) may use
+      // `all()`; a write is `reader === false` OR absent per SqliteStatementLike's contract, and
+      // calling `all()` on it throws in better-sqlite3. Route by truthiness so absent means write.
+      if (statement.reader) {
+        return { rows: statement.all(...params) };
       }
-      return Promise.resolve({ rows: statement.all(...params) });
+      const info = statement.run(...params);
+      return { rows: [], rowCount: info.changes };
     },
     end(): Promise<void> {
       db.close();

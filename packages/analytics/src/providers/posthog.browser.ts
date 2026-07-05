@@ -7,7 +7,7 @@ import type { PostHogConfig } from "../config.js";
 import { VendorReporter } from "./vendor.js";
 
 /** PostHog Cloud host; Go's default. */
-const DEFAULT_HOST = "https://app.posthog.com";
+const DEFAULT_HOST = "https://us.i.posthog.com";
 
 /**
  * The slice of the `posthog-js` client the adapter calls. `capture`/`identify` accept the browser

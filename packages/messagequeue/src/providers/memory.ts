@@ -14,7 +14,8 @@ import {
 } from "../messagequeue.js";
 
 import {
-  consumedCounter,
+  consumerInstruments,
+  type ConsumerInstruments,
   encodeJSON,
   LENGTH_KEY,
   publisherInstruments,
@@ -76,7 +77,7 @@ class MemoryPublisher implements Publisher {
   constructor(broker: MemoryBroker, topic: string, deps?: ObservabilityDeps) {
     this.#broker = broker;
     this.#topic = topic;
-    this.#observer = makeObserver(`${topic}_publisher`, deps);
+    this.#observer = deps?.observer ?? makeObserver(`${topic}_publisher`, deps);
     this.#instruments = publisherInstruments(deps, topic);
   }
 
@@ -101,7 +102,9 @@ class MemoryPublisher implements Publisher {
     });
   }
 
-  stop(): void {}
+  stop(): Promise<void> {
+    return Promise.resolve();
+  }
 }
 
 /** A {@link PublisherProvider} backed by an in-process {@link MemoryBroker}. */
@@ -128,8 +131,9 @@ export class MemoryPublisherProvider implements PublisherProvider {
     return Promise.resolve();
   }
 
-  close(): void {
+  close(): Promise<void> {
     this.#cache.clear();
+    return Promise.resolve();
   }
 }
 
@@ -138,7 +142,7 @@ class MemoryConsumer implements Consumer {
   readonly #topic: string;
   readonly #handler: ConsumerFunc;
   readonly #observer: Observer;
-  readonly #consumed: ReturnType<typeof consumedCounter>;
+  readonly #instruments: ConsumerInstruments;
 
   constructor(
     broker: MemoryBroker,
@@ -149,8 +153,8 @@ class MemoryConsumer implements Consumer {
     this.#broker = broker;
     this.#topic = topic;
     this.#handler = handler;
-    this.#observer = makeObserver(`${topic}_consumer`, deps);
-    this.#consumed = consumedCounter(deps, topic);
+    this.#observer = deps?.observer ?? makeObserver(`${topic}_consumer`, deps);
+    this.#instruments = consumerInstruments(deps, topic);
   }
 
   consume(signal?: AbortSignal, onError?: (err: unknown) => void): Promise<void> {
@@ -174,10 +178,11 @@ class MemoryConsumer implements Consumer {
   async #deliver(data: Uint8Array, onError?: (err: unknown) => void): Promise<void> {
     await this.#observer.run("consume_message", async (op) => {
       op.set(TOPIC_KEY, this.#topic).set(LENGTH_KEY, data.length);
-      this.#consumed.add(1);
       try {
         await this.#handler(data);
+        this.#instruments.consumed.add(1);
       } catch (err) {
+        this.#instruments.consumeErrors.add(1);
         op.acknowledge(err, "handling message");
         onError?.(err);
       }
@@ -200,9 +205,16 @@ export class MemoryConsumerProvider implements ConsumerProvider {
     if (topic === "") {
       return Promise.reject(ErrEmptyTopicName);
     }
-    return this.#cache.getOrBuild(topic, () =>
-      Promise.resolve(new MemoryConsumer(this.#broker, topic, handler, this.#deps)),
+    return this.#cache.getOrBuild(
+      topic,
+      () => Promise.resolve(new MemoryConsumer(this.#broker, topic, handler, this.#deps)),
+      handler,
     );
+  }
+
+  close(): Promise<void> {
+    this.#cache.clear();
+    return Promise.resolve();
   }
 }
 

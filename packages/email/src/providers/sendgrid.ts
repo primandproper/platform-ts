@@ -1,9 +1,9 @@
 import {
   makeObserver,
-  type Logger,
   type ObservabilityDeps,
   type Observer,
 } from "@primandproper/observability";
+import type { Policy, RetryConfig } from "@primandproper/retry";
 
 import {
   assertHasBody,
@@ -12,8 +12,18 @@ import {
   type Recipients,
   type SendResult,
 } from "../email.js";
+import { senderInstruments, type SenderInstruments } from "../support.js";
 
-import { recipientList, resolveFetch, type FetchLike } from "./http.js";
+import {
+  DEFAULT_EMAIL_TIMEOUT_MS,
+  recipientDomain,
+  recipientList,
+  requestIdFromHeaders,
+  resilientFetch,
+  resolveFetch,
+  retryPolicy,
+  type FetchLike,
+} from "./http.js";
 
 const o11yName = "email";
 
@@ -22,6 +32,10 @@ export interface SendgridEmailOptions {
   apiKey: string;
   /** Overrides the API base URL. Defaults to `https://api.sendgrid.com`. */
   baseUrl?: string;
+  /** Per-send deadline in milliseconds; `0` disables it. Defaults to 30s. */
+  timeoutMs?: number;
+  /** Optional retry policy for transient failures (network/timeout, 429/5xx). Off by default. */
+  retry?: RetryConfig | undefined;
   /** The `fetch` implementation. Defaults to `globalThis.fetch`. */
   fetch?: FetchLike;
 }
@@ -35,37 +49,60 @@ export class SendgridEmail implements Email {
   readonly #apiKey: string;
   readonly #baseUrl: string;
   readonly #fetch: FetchLike;
+  readonly #timeoutMs: number;
+  readonly #retry: Policy | undefined;
   readonly #observer: Observer;
-  readonly #logger: Logger;
+  readonly #instruments: SenderInstruments;
 
   constructor(options: SendgridEmailOptions, deps: ObservabilityDeps = {}) {
     this.#apiKey = options.apiKey;
     this.#baseUrl = options.baseUrl ?? "https://api.sendgrid.com";
     this.#fetch = resolveFetch(options.fetch);
+    this.#timeoutMs = options.timeoutMs ?? DEFAULT_EMAIL_TIMEOUT_MS;
     this.#observer = deps.observer ?? makeObserver(o11yName, deps);
-    this.#logger = this.#observer.logger();
+    this.#retry = retryPolicy(options.retry, this.#observer.logger());
+    this.#instruments = senderInstruments(o11yName, deps);
   }
 
-  async send(message: EmailMessage): Promise<SendResult> {
-    assertHasBody(message);
+  send(message: EmailMessage): Promise<SendResult> {
+    return this.#observer.run("send", async (op) => {
+      assertHasBody(message);
+      op.set("recipientDomain", recipientDomain(message.to));
 
-    const response = await this.#fetch(`${this.#baseUrl}/v3/mail/send`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.#apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(toSendgridPayload(message)),
+      const response = await resilientFetch(
+        (signal) =>
+          this.#fetch(`${this.#baseUrl}/v3/mail/send`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${this.#apiKey}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify(toSendgridPayload(message)),
+            ...(signal === undefined ? {} : { signal }),
+          }),
+        { timeoutMs: this.#timeoutMs, retry: this.#retry },
+      );
+
+      if (!response.ok) {
+        const body = await response.text();
+        const requestId = requestIdFromHeaders(response.headers);
+        if (requestId !== undefined) {
+          op.set("requestId", requestId);
+        }
+        this.#instruments.errors.add(1);
+        throw op.error(
+          new Error(`sendgrid send failed: ${String(response.status)} ${body}`),
+          `sendgrid send failed with status ${String(response.status)}`,
+        );
+      }
+
+      const id = response.headers.get("x-message-id");
+      if (id !== null) {
+        op.set("requestId", id);
+      }
+      this.#instruments.sends.add(1);
+      return id === null ? {} : { id };
     });
-
-    if (!response.ok) {
-      const body = await response.text();
-      this.#logger.error(`sendgrid send failed with status ${String(response.status)}`);
-      throw new Error(`sendgrid send failed: ${String(response.status)} ${body}`);
-    }
-
-    const id = response.headers.get("x-message-id");
-    return id === null ? {} : { id };
   }
 
   async ping(): Promise<void> {

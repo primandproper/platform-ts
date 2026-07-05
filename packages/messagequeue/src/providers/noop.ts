@@ -13,7 +13,9 @@ export class NoopPublisher implements Publisher {
 
   publishAsync(): void {}
 
-  stop(): void {}
+  stop(): Promise<void> {
+    return Promise.resolve();
+  }
 }
 
 /** A {@link PublisherProvider} that hands out {@link NoopPublisher}s. Go's `noop.publisherProvider`. */
@@ -26,7 +28,9 @@ export class NoopPublisherProvider implements PublisherProvider {
     return Promise.resolve();
   }
 
-  close(): void {}
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
 }
 
 /** A {@link Consumer} that never delivers anything and resolves only once aborted. */
@@ -51,5 +55,9 @@ export class NoopConsumer implements Consumer {
 export class NoopConsumerProvider implements ConsumerProvider {
   provideConsumer(): Promise<Consumer> {
     return Promise.resolve(new NoopConsumer());
+  }
+
+  close(): Promise<void> {
+    return Promise.resolve();
   }
 }

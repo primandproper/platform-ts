@@ -1,9 +1,50 @@
-import { type Span, type Tracer } from "@opentelemetry/api";
+import { type Meter, type Span, type Tracer } from "@opentelemetry/api";
 import { describe, expect, it, vi } from "vitest";
 
 import { type Logger } from "./logger.js";
-import { type TracerProvider } from "./observability.js";
+import { type MeterProvider, type TracerProvider } from "./observability.js";
 import { makeObserver } from "./observer.js";
+
+/** A meter provider capturing every instrument record/add, for asserting auto-recorded metrics. */
+function recordingMeter(): {
+  provider: MeterProvider;
+  records: {
+    name: string;
+    value: number;
+    attributes: Record<string, unknown> | undefined;
+  }[];
+  adds: {
+    name: string;
+    value: number;
+    attributes: Record<string, unknown> | undefined;
+  }[];
+} {
+  const records: {
+    name: string;
+    value: number;
+    attributes: Record<string, unknown> | undefined;
+  }[] = [];
+  const adds: {
+    name: string;
+    value: number;
+    attributes: Record<string, unknown> | undefined;
+  }[] = [];
+  const meter = {
+    createHistogram: (name: string) => ({
+      record: (value: number, attributes?: Record<string, unknown>) => {
+        records.push({ name, value, attributes });
+      },
+    }),
+    createCounter: (name: string) => ({
+      add: (value: number, attributes?: Record<string, unknown>) => {
+        adds.push({ name, value, attributes });
+      },
+    }),
+    createUpDownCounter: () => ({ add: () => undefined }),
+    createGauge: () => ({ record: () => undefined }),
+  } as unknown as Meter;
+  return { provider: { getMeter: () => meter }, records, adds };
+}
 
 /** A recording span plus a tracer wiring it into both `startSpan` and `startActiveSpan`. */
 function recordingTracer(): {
@@ -41,14 +82,24 @@ function recordingTracer(): {
   return { provider, startSpan, span: spanMocks, names };
 }
 
-/** A logger recording the names it was `child`-ed under. */
-function recordingLogger(): { logger: Logger; childNames: string[] } {
+/**
+ * A logger recording the names it was `child`-ed under and every `error` call across all its
+ * derived children (via a shared sink, since `with`/`withSpan`/`child` return fresh loggers).
+ */
+function recordingLogger(): {
+  logger: Logger;
+  childNames: string[];
+  errorCalls: { message: string; err: unknown }[];
+} {
   const childNames: string[] = [];
+  const errorCalls: { message: string; err: unknown }[] = [];
   const make = (): Logger => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
+    error: (message, err) => {
+      errorCalls.push({ message, err });
+    },
     with: () => make(),
     child: (name) => {
       childNames.push(name);
@@ -56,7 +107,7 @@ function recordingLogger(): { logger: Logger; childNames: string[] } {
     },
     withSpan: () => make(),
   });
-  return { logger: make(), childNames };
+  return { logger: make(), childNames, errorCalls };
 }
 
 describe("makeObserver", () => {
@@ -134,6 +185,97 @@ describe("makeObserver", () => {
 
       expect(span.recordException).toHaveBeenCalledWith(boom);
       expect(span.end).toHaveBeenCalledOnce();
+    });
+
+    // OBS-1: a component that only calls run gets duration + outcome metrics for free.
+    it("auto-records a duration histogram and outcome counter on success", async () => {
+      const { logger } = recordingLogger();
+      const { provider } = recordingTracer();
+      const meter = recordingMeter();
+
+      const observer = makeObserver("svc", {
+        logger,
+        tracer: provider,
+        metrics: meter.provider,
+      });
+      await observer.run("doWork", () => 1);
+
+      expect(meter.records).toContainEqual(
+        expect.objectContaining({
+          name: "operation.duration",
+          attributes: { operation: "doWork", outcome: "ok" },
+        }),
+      );
+      expect(meter.adds).toContainEqual({
+        name: "operation.count",
+        value: 1,
+        attributes: { operation: "doWork", outcome: "ok" },
+      });
+    });
+
+    it("tags the auto-recorded metrics with the error outcome when the callback throws", async () => {
+      const { logger } = recordingLogger();
+      const { provider } = recordingTracer();
+      const meter = recordingMeter();
+
+      const observer = makeObserver("svc", {
+        logger,
+        tracer: provider,
+        metrics: meter.provider,
+      });
+      await expect(
+        observer.run("doWork", () => {
+          throw new Error("boom");
+        }),
+      ).rejects.toThrow("boom");
+
+      expect(meter.adds).toContainEqual({
+        name: "operation.count",
+        value: 1,
+        attributes: { operation: "doWork", outcome: "error" },
+      });
+      expect(meter.records).toContainEqual(
+        expect.objectContaining({
+          name: "operation.duration",
+          attributes: { operation: "doWork", outcome: "error" },
+        }),
+      );
+    });
+
+    // OBS-2: an uncaught throw is logged exactly once and recorded on the span exactly once.
+    it("logs and records an uncaught throw exactly once", async () => {
+      const { logger, errorCalls } = recordingLogger();
+      const { provider, span } = recordingTracer();
+      const boom = new Error("boom");
+
+      const observer = makeObserver("svc", { logger, tracer: provider });
+      await expect(
+        observer.run("doWork", () => {
+          throw boom;
+        }),
+      ).rejects.toBe(boom);
+
+      expect(span.recordException).toHaveBeenCalledOnce();
+      expect(errorCalls).toHaveLength(1);
+      expect(errorCalls[0]?.err).toBe(boom);
+    });
+
+    // OBS-3: routing the throw through op.error must not double-record or double-log.
+    it("does not double-record when the callback throws op.error", async () => {
+      const { logger, errorCalls } = recordingLogger();
+      const { provider, span } = recordingTracer();
+      const boom = new Error("boom");
+
+      const observer = makeObserver("svc", { logger, tracer: provider });
+      await expect(
+        observer.run("doWork", (op) => {
+          throw op.error(boom, "handling failed");
+        }),
+      ).rejects.toBe(boom);
+
+      expect(span.recordException).toHaveBeenCalledOnce();
+      expect(errorCalls).toHaveLength(1);
+      expect(errorCalls[0]).toEqual({ message: "handling failed", err: boom });
     });
   });
 });

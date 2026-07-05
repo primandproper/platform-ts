@@ -23,7 +23,7 @@ import type {
   URLSigner,
 } from "./capabilities.js";
 import type { UploadsConfig } from "./config.js";
-import type { BlobBody } from "./stream.js";
+import { limitStream, type BlobBody } from "./stream.js";
 import type { SaveOptions, UploadManager } from "./uploads.js";
 
 type Counter = ReturnType<Metrics["counter"]>;
@@ -35,14 +35,33 @@ const LENGTH_KEY = "length";
 const PREFIX_KEY = "prefix";
 const OBJECT_COUNT_KEY = "object.count";
 
+/** The stable error `code` carried by every circuit-broken error; match with `isPlatformError`. */
+export const CIRCUIT_BROKEN_CODE = "uploads/circuit-broken";
+
 /**
- * Thrown when the circuit breaker is open, short-circuiting a doomed call. The port of Go's
- * `circuitbreaking.ErrCircuitBroken`, which the TS circuitbreaking package does not export.
+ * Mints a fresh error signalling the circuit breaker is open, short-circuiting a doomed call. The
+ * port of Go's `circuitbreaking.ErrCircuitBroken` (which the TS circuitbreaking package does not
+ * export). A factory, not a shared singleton, so each throw carries a stack captured at the throw
+ * site rather than one frozen at module load — match by `isPlatformError(err, CIRCUIT_BROKEN_CODE)`.
  */
-export const ErrCircuitBroken = new PlatformError(
-  "uploads/circuit-broken",
-  "circuit breaker is open",
-);
+export function newCircuitBrokenError(): PlatformError {
+  return new PlatformError(CIRCUIT_BROKEN_CODE, "circuit breaker is open");
+}
+
+/** The stable error `code` carried by an over-max-size write rejection. */
+export const FILE_TOO_LARGE_CODE = "uploads/file-too-large";
+
+/** Mints a fresh error for a write that exceeds the configured `maxSizeBytes` backstop. */
+export function newFileTooLargeError(
+  limitBytes: number,
+  actualBytes?: number,
+): PlatformError {
+  const seen = actualBytes === undefined ? "" : ` (got ${String(actualBytes)})`;
+  return new PlatformError(
+    FILE_TOO_LARGE_CODE,
+    `upload exceeds maximum size of ${String(limitBytes)} bytes${seen}`,
+  );
+}
 
 /**
  * The instrumented {@link UploadManager}: a {@link Bucket} wrapped with a circuit breaker,
@@ -62,10 +81,12 @@ export class Uploader
   readonly #saveErrCounter: Counter;
   readonly #readErrCounter: Counter;
   readonly #latencyHist: Histogram;
+  readonly #maxSizeBytes: number;
 
   constructor(config: UploadsConfig, bucket: Bucket, deps: ObservabilityDeps = {}) {
     const serviceName = `${config.bucketName}_uploader`;
     this.#bucket = bucket;
+    this.#maxSizeBytes = config.maxSizeBytes;
     this.#observer = deps.observer ?? makeObserver(serviceName, deps);
     this.#circuitBreaker = provideCircuitBreaker(config.circuitBreaker, deps);
 
@@ -88,8 +109,26 @@ export class Uploader
           op.set(LENGTH_KEY, body.length);
         }
       },
-      () => this.#bucket.write(path, body, opts),
+      () => this.#bucket.write(path, this.#enforceMaxSize(body), opts),
     );
+  }
+
+  /**
+   * Applies the `maxSizeBytes` backstop (`0` = disabled). A byte body over the limit is rejected
+   * up front; a stream body is wrapped so it errors mid-transfer once it crosses the limit,
+   * without buffering the whole payload. Errors surface as {@link newFileTooLargeError}.
+   */
+  #enforceMaxSize(body: BlobBody): BlobBody {
+    if (this.#maxSizeBytes <= 0) {
+      return body;
+    }
+    if (body instanceof Uint8Array) {
+      if (body.length > this.#maxSizeBytes) {
+        throw newFileTooLargeError(this.#maxSizeBytes, body.length);
+      }
+      return body;
+    }
+    return limitStream(body, this.#maxSizeBytes, (limit) => newFileTooLargeError(limit));
   }
 
   open(path: string): Promise<ReadableStream<Uint8Array>> {
@@ -157,7 +196,7 @@ export class Uploader
     try {
       op.set(PREFIX_KEY, prefix);
       if (!this.#circuitBreaker.canProceed()) {
-        throw ErrCircuitBroken;
+        throw newCircuitBrokenError();
       }
       try {
         for await (const obj of this.#bucket.list(prefix)) {
@@ -196,7 +235,7 @@ export class Uploader
     try {
       setup(op);
       if (!this.#circuitBreaker.canProceed()) {
-        throw ErrCircuitBroken;
+        throw newCircuitBrokenError();
       }
       const start = performance.now();
       try {

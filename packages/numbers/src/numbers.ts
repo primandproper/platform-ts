@@ -12,6 +12,21 @@ function assertFinite(value: number, name: string): void {
 }
 
 /**
+ * Multiplies `n` by `10 ** exp`. Prefers the exact decimal-string `e`-shift (which dodges the
+ * float multiplication error that plagues `n * 10 ** exp`), but that trick yields `NaN` when
+ * `n.toString()` is itself in exponential notation — which JS uses for `|n| >= 1e21` or
+ * `|n| < 1e-6`. For those magnitudes it falls back to plain scaling, where trailing-digit
+ * precision is moot anyway.
+ */
+function shiftPow10(n: number, exp: number): number {
+  const s = n.toString();
+  if (s.includes("e")) {
+    return n * 10 ** exp;
+  }
+  return Number(`${s}e${exp.toString()}`);
+}
+
+/**
  * Rounds `value` to `decimals` places using round-half-away-from-zero, correcting
  * for binary-float representation so `round(1.005, 2) === 1.01` and
  * `round(2.675, 2) === 2.68`. Mirrors the Go platform's `Round`.
@@ -25,13 +40,13 @@ export function round(value: number, decimals = 0): number {
   }
   if (value === 0) return 0; // preserve +0, never emit -0
   const sign = value < 0 ? -1 : 1;
-  // Scale via exponential notation to dodge the float multiplication error
-  // (e.g. 1.005 * 100 === 100.49999...). The `e` shift is exact for the
-  // magnitudes this util targets.
-  const shifted = Number(`${Math.abs(value).toString()}e${decimals.toString()}`);
+  // Scale via the exact `e`-shift to dodge the float multiplication error
+  // (e.g. 1.005 * 100 === 100.49999...), falling back for exponential-notation
+  // magnitudes so extreme inputs round instead of returning NaN.
+  const shifted = shiftPow10(Math.abs(value), decimals);
   const rounded = Math.round(shifted);
   if (rounded === 0) return 0; // a magnitude that rounds to zero stays +0
-  return sign * Number(`${rounded.toString()}e-${decimals.toString()}`);
+  return sign * shiftPow10(rounded, -decimals);
 }
 
 /**

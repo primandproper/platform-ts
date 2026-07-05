@@ -1,3 +1,5 @@
+import { Readable } from "node:stream";
+
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -7,13 +9,14 @@ import {
   S3Client,
   type S3ClientConfig,
 } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { wrap } from "@primandproper/errors";
 
 import { BlobNotFoundError, type Bucket } from "../bucket.js";
 import type { Attributes, ObjectInfo, SignedURLOptions } from "../capabilities.js";
 import type { BackblazeB2Config, R2Config } from "../config.js";
-import { toBytes, type BlobBody } from "../stream.js";
+import type { BlobBody } from "../stream.js";
 import type { SaveOptions } from "../uploads.js";
 
 /**
@@ -21,10 +24,11 @@ import type { SaveOptions } from "../uploads.js";
  * and — as in platform-go, where R2 and Backblaze B2 also open through `s3blob` with a custom
  * endpoint — the single implementation behind the `s3`, `r2`, and `backblaze_b2` providers.
  *
- * Reads stream (so ranged reads never buffer a whole object), but a write drains its body first:
- * a single `PutObject` needs a known length, and pulling in `@aws-sdk/lib-storage` for multipart
- * streaming isn't worth it here. A missing object is normalized to {@link BlobNotFoundError};
- * every other SDK failure is rethrown wrapped with context.
+ * Both reads and writes stream without buffering a whole object. A bytes body is already fully in
+ * memory, so it takes a single `PutObject`; a stream body of unknown length goes through
+ * `@aws-sdk/lib-storage`'s `Upload`, which multiparts it rather than draining it into memory. A
+ * missing object is normalized to {@link BlobNotFoundError}; every other SDK failure is rethrown
+ * wrapped with context.
  */
 export class S3Bucket implements Bucket {
   readonly #client: S3Client;
@@ -37,15 +41,28 @@ export class S3Bucket implements Bucket {
 
   async write(key: string, body: BlobBody, opts?: SaveOptions): Promise<void> {
     try {
-      await this.#client.send(
-        new PutObjectCommand({
+      if (body instanceof Uint8Array) {
+        await this.#client.send(
+          new PutObjectCommand({
+            Bucket: this.#bucket,
+            Key: key,
+            Body: body,
+            ContentType: opts?.contentType,
+            CacheControl: opts?.cacheControl,
+          }),
+        );
+        return;
+      }
+      await new Upload({
+        client: this.#client,
+        params: {
           Bucket: this.#bucket,
           Key: key,
-          Body: await toBytes(body),
+          Body: Readable.fromWeb(body),
           ContentType: opts?.contentType,
           CacheControl: opts?.cacheControl,
-        }),
-      );
+        },
+      }).done();
     } catch (err) {
       throw wrap(`s3 write failed for key '${key}'`, err);
     }

@@ -8,11 +8,17 @@ export type LogValues = Record<string, unknown>;
  * implements exactly this, so call-site code is identical regardless of where it runs.
  */
 export interface Logger {
-  debug(message: string): void;
-  info(message: string): void;
-  warn(message: string): void;
-  /** Logs an error alongside a description of what was happening when it occurred. */
-  error(whatWasHappening: string, err?: unknown): void;
+  /** Logs a debug line, optionally with structured key/values attached to just this line. */
+  debug(message: string, values?: LogValues): void;
+  /** Logs an info line, optionally with structured key/values attached to just this line. */
+  info(message: string, values?: LogValues): void;
+  /** Logs a warn line, optionally with structured key/values attached to just this line. */
+  warn(message: string, values?: LogValues): void;
+  /**
+   * Logs an error alongside a description of what was happening when it occurred, optionally
+   * with structured key/values attached to just this line.
+   */
+  error(whatWasHappening: string, err?: unknown, values?: LogValues): void;
   /** Returns a logger that attaches the given values to every subsequent line. */
   with(values: LogValues): Logger;
   /** Returns a named child logger. */

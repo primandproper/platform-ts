@@ -6,11 +6,20 @@ const DEFAULT_EXPIRY_MS = 3_600_000;
 const BaseCacheConfigSchema = z.object({
   /** Per-entry time-to-live in milliseconds. `0` disables expiry. */
   expiryMs: z.number().int().nonnegative().default(DEFAULT_EXPIRY_MS),
+  /**
+   * Max live entries for the in-memory provider before oldest-inserted entries are evicted.
+   * `0` disables the cap (unbounded). Ignored by the redis/web providers. Defaults to 100,000.
+   */
+  maxEntries: z.number().int().nonnegative().default(100_000),
 });
 
 export const RedisConfigSchema = z.object({
   url: z.string().url(),
   keyPrefix: z.string().default(""),
+  /** Reject a command that outlives this many ms — the fail-fast timeout knob. Off by default. */
+  commandTimeoutMs: z.number().int().positive().optional(),
+  /** TCP connect timeout in ms. Defaults to ioredis's 10s. */
+  connectTimeoutMs: z.number().int().positive().optional(),
 });
 
 export type RedisConfig = z.infer<typeof RedisConfigSchema>;

@@ -1,10 +1,29 @@
+import { RetryConfigSchema } from "@primandproper/retry";
 import { z } from "zod";
+
+/** Thirty seconds — the default per-send deadline shared by every REST transport. */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * Per-send deadline in milliseconds; `0` disables it. Shared by every REST transport so a wedged
+ * vendor call fails fast instead of hanging (NET-1).
+ */
+const timeoutMs = z.number().int().nonnegative().default(DEFAULT_TIMEOUT_MS);
+
+/**
+ * Optional retry policy for transient send failures (network/timeout errors and 429/5xx). Omitted
+ * means a single attempt — retry is opt-in because a send is not idempotent, so a replay after an
+ * ambiguous failure can double-deliver.
+ */
+const retry = RetryConfigSchema.optional();
 
 /** Resend-provider config: an API key authenticates against the Resend REST API. */
 export const ResendEmailConfigSchema = z.object({
   apiKey: z.string(),
   /** Overrides the API base URL. Defaults to Resend's public endpoint. */
   baseUrl: z.string().default("https://api.resend.com"),
+  timeoutMs,
+  retry,
 });
 
 export type ResendEmailConfig = z.infer<typeof ResendEmailConfigSchema>;
@@ -20,6 +39,8 @@ export type PostmarkEmailConfig = z.infer<typeof PostmarkEmailConfigSchema>;
 export const SendgridEmailConfigSchema = z.object({
   apiKey: z.string(),
   baseUrl: z.string().default("https://api.sendgrid.com"),
+  timeoutMs,
+  retry,
 });
 
 export type SendgridEmailConfig = z.infer<typeof SendgridEmailConfigSchema>;
@@ -30,6 +51,8 @@ export const MailgunEmailConfigSchema = z.object({
   domain: z.string(),
   /** Defaults to the US endpoint; use `https://api.eu.mailgun.net` for the EU region. */
   baseUrl: z.string().default("https://api.mailgun.net"),
+  timeoutMs,
+  retry,
 });
 
 export type MailgunEmailConfig = z.infer<typeof MailgunEmailConfigSchema>;
@@ -39,6 +62,8 @@ export const MailjetEmailConfigSchema = z.object({
   apiKey: z.string(),
   secretKey: z.string(),
   baseUrl: z.string().default("https://api.mailjet.com"),
+  timeoutMs,
+  retry,
 });
 
 export type MailjetEmailConfig = z.infer<typeof MailjetEmailConfigSchema>;

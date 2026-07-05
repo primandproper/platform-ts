@@ -21,6 +21,15 @@ describe("base64 helpers", () => {
     const bytes = new Uint8Array([0, 1, 2, 254, 255, 128, 64]);
     expect(base64ToBytes(bytesToBase64(bytes))).toStrictEqual(bytes);
   });
+
+  it("round-trips a payload larger than the chunk size (PERF-4)", () => {
+    // Exceeds the 0x8000 fromCharCode chunk so the chunked path is exercised across boundaries.
+    const bytes = new Uint8Array(0x8000 * 2 + 123);
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = i % 256;
+    }
+    expect(base64ToBytes(bytesToBase64(bytes))).toStrictEqual(bytes);
+  });
 });
 
 /**
@@ -81,9 +90,16 @@ describe("AesGcmEncryptor", () => {
     await expect(enc.decrypt(new Uint8Array(8))).rejects.toThrow(/too short/);
   });
 
-  it("rejects an invalid key length", async () => {
-    const enc = new AesGcmEncryptor({ key: bytesToBase64(new Uint8Array(10)) });
-    await expect(enc.encrypt(encoder.encode("x"))).rejects.toThrow(/key length/);
+  it("rejects an invalid key length at construction (not first use)", () => {
+    expect(() => new AesGcmEncryptor({ key: bytesToBase64(new Uint8Array(10)) })).toThrow(
+      /key length/,
+    );
+  });
+
+  it("rejects a key that is not valid base64 with a clear message", () => {
+    expect(() => new AesGcmEncryptor({ key: "not valid base64!!!" })).toThrow(
+      /not valid base64/,
+    );
   });
 
   it("fails to decrypt with the wrong key", async () => {
@@ -122,6 +138,26 @@ describe("Salsa20Encryptor", () => {
     expect(
       () => new Salsa20Encryptor({ key: bytesToBase64(new Uint8Array(16)) }),
     ).toThrow(/key length/);
+  });
+
+  // CRYPT-1: the tamper-rejection promise is explicitly carved out for unauthenticated providers.
+  it("declares itself unauthenticated and cannot detect tampering", async () => {
+    const enc = new Salsa20Encryptor({ key: TEST_KEY });
+    expect(enc.authenticated).toBe(false);
+
+    const ciphertext = await enc.encrypt(encoder.encode("integrity absent"));
+    const last = ciphertext.byteLength - 1;
+    ciphertext[last] = (ciphertext[last] ?? 0) ^ 0xff;
+    // A tampered ciphertext decrypts WITHOUT throwing — the documented carve-out, not a regression.
+    await expect(enc.decrypt(ciphertext)).resolves.toBeInstanceOf(Uint8Array);
+  });
+});
+
+describe("Encryptor.authenticated carve-out (CRYPT-1)", () => {
+  it("marks only AES-GCM as authenticated", () => {
+    expect(new AesGcmEncryptor({ key: TEST_KEY }).authenticated).toBe(true);
+    expect(new Salsa20Encryptor({ key: TEST_KEY }).authenticated).toBe(false);
+    expect(new PassthroughEncryptor().authenticated).toBe(false);
   });
 });
 

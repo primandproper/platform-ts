@@ -1,6 +1,7 @@
 import QRCode, { type QRCodeRenderersOptions } from "qrcode";
 
 import type { QRCodesConfig, QRErrorCorrectionLevel } from "./config.js";
+import { QRCodeError } from "./errors.js";
 
 /**
  * Per-call rendering overrides — a curated subset of the `qrcode` library's options.
@@ -54,16 +55,31 @@ class QRCodeGeneratorImpl implements QRCodeGenerator {
     this.#defaults = defaults;
   }
 
-  toDataUrl(data: string, opts?: QRCodeOptions): Promise<string> {
-    return QRCode.toDataURL(data, mergeOptions(this.#defaults, opts));
+  async toDataUrl(data: string, opts?: QRCodeOptions): Promise<string> {
+    try {
+      return await QRCode.toDataURL(data, mergeOptions(this.#defaults, opts));
+    } catch (err) {
+      throw new QRCodeError("data URL", err);
+    }
   }
 
-  toSvg(data: string, opts?: QRCodeOptions): Promise<string> {
-    return QRCode.toString(data, { ...mergeOptions(this.#defaults, opts), type: "svg" });
+  async toSvg(data: string, opts?: QRCodeOptions): Promise<string> {
+    try {
+      return await QRCode.toString(data, {
+        ...mergeOptions(this.#defaults, opts),
+        type: "svg",
+      });
+    } catch (err) {
+      throw new QRCodeError("SVG", err);
+    }
   }
 
   async toBuffer(data: string, opts?: QRCodeOptions): Promise<Uint8Array> {
-    return QRCode.toBuffer(data, mergeOptions(this.#defaults, opts));
+    try {
+      return await QRCode.toBuffer(data, mergeOptions(this.#defaults, opts));
+    } catch (err) {
+      throw new QRCodeError("PNG buffer", err);
+    }
   }
 }
 

@@ -1,4 +1,3 @@
-import { wrap } from "@primandproper/errors";
 import {
   makeObserver,
   type Logger,
@@ -7,9 +6,14 @@ import {
 } from "@primandproper/observability";
 import { Client, Errors } from "typesense";
 
-import type { TextDocument, TextHit, TextIndex, TextSearchOptions } from "../text.js";
-
-const o11yName = "search";
+import {
+  DEFAULT_SEARCH_LIMIT,
+  ID_KEY,
+  INDEX_NAME_KEY,
+  LENGTH_KEY,
+  SEARCH_QUERY_KEY,
+} from "../document-index.js";
+import type { BulkTextIndex, TextDocument, TextHit, TextSearchOptions } from "../text.js";
 
 /**
  * The Typesense document shape this provider stores. `text` is the searchable field;
@@ -45,7 +49,7 @@ export interface TypesenseTextOptions {
  * rethrown wrapped with context; a delete of an unknown id is a no-op, and a miss is an
  * empty array rather than a sentinel.
  */
-export class TypesenseTextIndex implements TextIndex {
+export class TypesenseTextIndex implements BulkTextIndex {
   readonly #client: Client;
   readonly #collection: string;
   readonly #observer: Observer;
@@ -54,7 +58,7 @@ export class TypesenseTextIndex implements TextIndex {
 
   constructor(options: TypesenseTextOptions, deps: ObservabilityDeps = {}) {
     this.#collection = options.collection;
-    this.#observer = deps.observer ?? makeObserver(o11yName, deps);
+    this.#observer = deps.observer ?? makeObserver(`search_${options.collection}`, deps);
     this.#logger = this.#observer.logger();
     this.#client = new Client({
       apiKey: options.apiKey,
@@ -76,96 +80,144 @@ export class TypesenseTextIndex implements TextIndex {
     return (this.#ensured ??= this.#createCollection());
   }
 
-  async #createCollection(): Promise<void> {
-    try {
-      const exists = await this.#client.collections(this.#collection).exists();
-      if (exists) {
-        return;
-      }
-      await this.#client.collections().create({
-        name: this.#collection,
-        fields: [
-          { name: "id", type: "string" },
-          { name: "text", type: "string" },
-          { name: "metadata", type: "string", optional: true, index: false },
-        ],
-      });
-    } catch (error) {
-      // Another caller may have raced us to create it; tolerate that, surface the rest.
-      if (error instanceof Errors.ObjectAlreadyExists) {
-        return;
-      }
-      this.#ensured = undefined;
-      this.#logger.error("typesense ensure collection failed");
-      throw wrap("typesense ensure collection failed", error);
-    }
-  }
+  #createCollection(): Promise<void> {
+    return this.#observer.run("EnsureCollection", async (op) => {
+      op.set(INDEX_NAME_KEY, this.#collection);
 
-  async index(doc: TextDocument): Promise<void> {
-    await this.#ensureCollection();
-
-    const document: TypesenseTextDocument = {
-      id: doc.id,
-      text: doc.text,
-      ...(doc.metadata !== undefined ? { metadata: JSON.stringify(doc.metadata) } : {}),
-    };
-
-    try {
-      await this.#client
-        .collections<TypesenseTextDocument>(this.#collection)
-        .documents()
-        .upsert(document);
-    } catch (error) {
-      this.#logger.error("typesense index failed");
-      throw wrap(`typesense index failed for id ${doc.id}`, error);
-    }
-  }
-
-  async search(query: string, opts: TextSearchOptions = {}): Promise<TextHit[]> {
-    await this.#ensureCollection();
-
-    try {
-      const response = await this.#client
-        .collections<TypesenseTextDocument>(this.#collection)
-        .documents()
-        .search({
-          q: query,
-          query_by: "text",
-          ...(opts.limit !== undefined ? { per_page: opts.limit } : {}),
+      try {
+        const exists = await this.#client.collections(this.#collection).exists();
+        if (exists) {
+          return;
+        }
+        await this.#client.collections().create({
+          name: this.#collection,
+          fields: [
+            { name: "id", type: "string" },
+            { name: "text", type: "string" },
+            { name: "metadata", type: "string", optional: true, index: false },
+          ],
         });
-
-      const hits = response.hits ?? [];
-      return hits.map((hit) => toTextHit(hit.document, hit.text_match));
-    } catch (error) {
-      this.#logger.error("typesense search failed");
-      throw wrap("typesense search failed", error);
-    }
+      } catch (error) {
+        // Another caller may have raced us to create it; tolerate that, surface the rest.
+        if (error instanceof Errors.ObjectAlreadyExists) {
+          return;
+        }
+        this.#ensured = undefined;
+        throw op.error(error, "typesense ensure collection failed");
+      }
+    });
   }
 
-  async delete(id: string): Promise<void> {
-    await this.#ensureCollection();
+  index(doc: TextDocument): Promise<void> {
+    return this.#observer.run("Index", async (op) => {
+      op.set(ID_KEY, doc.id).set(INDEX_NAME_KEY, this.#collection);
+      await this.#ensureCollection();
 
-    try {
-      await this.#client.collections(this.#collection).documents(id).delete();
-    } catch (error) {
-      // A miss is not an error: deleting an unknown id is a no-op.
-      if (error instanceof Errors.ObjectNotFound) {
+      const document: TypesenseTextDocument = {
+        id: doc.id,
+        text: doc.text,
+        ...(doc.metadata !== undefined ? { metadata: JSON.stringify(doc.metadata) } : {}),
+      };
+
+      this.#logger.debug("adding to index");
+
+      try {
+        await this.#client
+          .collections<TypesenseTextDocument>(this.#collection)
+          .documents()
+          .upsert(document);
+      } catch (error) {
+        throw op.error(error, "typesense index failed");
+      }
+    });
+  }
+
+  indexMany(docs: readonly TextDocument[]): Promise<void> {
+    return this.#observer.run("IndexMany", async (op) => {
+      op.set(INDEX_NAME_KEY, this.#collection).set(LENGTH_KEY, docs.length);
+      if (docs.length === 0) {
         return;
       }
-      this.#logger.error("typesense delete failed");
-      throw wrap(`typesense delete failed for id ${id}`, error);
-    }
+      await this.#ensureCollection();
+
+      const documents: TypesenseTextDocument[] = docs.map((doc) => ({
+        id: doc.id,
+        text: doc.text,
+        ...(doc.metadata !== undefined ? { metadata: JSON.stringify(doc.metadata) } : {}),
+      }));
+
+      this.#logger.debug("bulk adding to index");
+
+      try {
+        // One `import` round trip instead of N upserts.
+        await this.#client
+          .collections<TypesenseTextDocument>(this.#collection)
+          .documents()
+          .import(documents, { action: "upsert" });
+      } catch (error) {
+        throw op.error(error, "typesense bulk index failed");
+      }
+    });
+  }
+
+  search(query: string, opts: TextSearchOptions = {}): Promise<TextHit[]> {
+    return this.#observer.run("Search", async (op) => {
+      op.set(SEARCH_QUERY_KEY, query).set(INDEX_NAME_KEY, this.#collection);
+      await this.#ensureCollection();
+
+      try {
+        const response = await this.#client
+          .collections<TypesenseTextDocument>(this.#collection)
+          .documents()
+          .search({
+            q: query,
+            query_by: "text",
+            per_page: opts.limit ?? DEFAULT_SEARCH_LIMIT,
+          });
+
+        const hits = response.hits ?? [];
+        const results = hits.map((hit) => toTextHit(hit.document, hit.text_match));
+        op.set(LENGTH_KEY, results.length);
+        this.#logger.debug("search performed");
+        return results;
+      } catch (error) {
+        throw op.error(error, "typesense search failed");
+      }
+    });
+  }
+
+  delete(id: string): Promise<void> {
+    return this.#observer.run("Delete", async (op) => {
+      op.set(ID_KEY, id).set(INDEX_NAME_KEY, this.#collection);
+      await this.#ensureCollection();
+
+      try {
+        await this.#client.collections(this.#collection).documents(id).delete();
+      } catch (error) {
+        // A miss is not an error: deleting an unknown id is a no-op.
+        if (error instanceof Errors.ObjectNotFound) {
+          return;
+        }
+        throw op.error(error, "typesense delete failed");
+      }
+
+      this.#logger.debug("removed from index");
+    });
   }
 
   async ping(): Promise<void> {
-    try {
-      const health = await this.#client.health.retrieve();
-      if (!health.ok) {
-        throw new Error("typesense reported unhealthy");
+    await this.#observer.run("Ping", async (op) => {
+      op.set(INDEX_NAME_KEY, this.#collection);
+
+      try {
+        const health = await this.#client.health.retrieve();
+        if (!health.ok) {
+          throw new Error("typesense reported unhealthy");
+        }
+      } catch (error) {
+        throw op.error(error, "typesense ping failed");
       }
-    } catch (error) {
-      throw wrap("typesense ping failed", error);
-    }
+    });
     await this.#ensureCollection();
   }
 }

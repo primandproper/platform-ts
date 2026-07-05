@@ -30,7 +30,7 @@ export function provideSegment(
   deps: ObservabilityDeps = {},
 ): EventReporter {
   const analytics = new Analytics({ writeKey: config.writeKey });
-  return new VendorReporter(
+  const reporter = new VendorReporter(
     "segment",
     {
       track(event, properties, context) {
@@ -62,4 +62,10 @@ export function provideSegment(
     },
     deps,
   );
+  // @segment/analytics-node flushes batches on a background timer; delivery failures only ever
+  // surface on the client's `error` event, so route them through the reporter rather than losing them.
+  analytics.on("error", (err) => {
+    reporter.onBackgroundError(err);
+  });
+  return reporter;
 }

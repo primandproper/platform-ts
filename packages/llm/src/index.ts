@@ -46,6 +46,8 @@ export function provideLLM(
           model: cfg.anthropic.model,
           baseUrl: cfg.anthropic.baseUrl,
           maxTokens: cfg.anthropic.maxTokens,
+          timeoutMs: cfg.anthropic.timeoutMs,
+          retry: cfg.anthropic.retry,
         },
         deps,
       );
@@ -59,6 +61,8 @@ export function provideLLM(
           model: cfg.openai.model,
           baseUrl: cfg.openai.baseUrl,
           maxTokens: cfg.openai.maxTokens,
+          timeoutMs: cfg.openai.timeoutMs,
+          retry: cfg.openai.retry,
         },
         deps,
       );

@@ -3,7 +3,7 @@ import {
   type ObservabilityDeps,
   type Observer,
 } from "@primandproper/observability";
-import { applicationDefault, cert, initializeApp } from "firebase-admin/app";
+import { applicationDefault, cert, deleteApp, initializeApp } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
 
 import { senderInstruments, type SenderInstruments } from "../support.js";
@@ -34,6 +34,8 @@ export interface FcmMessage {
  */
 export interface FcmClient {
   send(message: FcmMessage): Promise<string>;
+  /** Deletes the underlying Firebase app. Optional so injected fakes need not implement it. */
+  close?(): Promise<void>;
 }
 
 /** Builds an {@link FcmClient} backed by the real `firebase-admin` messaging client. */
@@ -49,12 +51,15 @@ export function newFcmClient(config: FcmConfig): FcmClient {
 
   return {
     send: (message) => messaging.send(message),
+    // Deletes the initialized app so its background work stops keeping the process alive.
+    close: () => deleteApp(app),
   };
 }
 
 /**
- * Sends push notifications to Android devices via FCM. Faithful to Go's `fcm.Sender`: it sets
- * `title` on the operation and records the returned `fcm.message_id`.
+ * Sends push notifications to Android devices via FCM. Faithful to Go's `fcm.Sender`: it records
+ * the returned `fcm.message_id`. The notification title is user content, so it is deliberately
+ * kept out of telemetry (INST-7).
  */
 export class FcmSender {
   readonly #client: FcmClient;
@@ -69,8 +74,6 @@ export class FcmSender {
 
   send(deviceToken: string, title: string, body: string): Promise<void> {
     return this.#observer.run("send", async (op) => {
-      op.set("title", title);
-
       let messageID: string;
       try {
         messageID = await this.#client.send({
@@ -85,5 +88,10 @@ export class FcmSender {
       op.set("fcm.message_id", messageID);
       this.#instruments.sends.add(1);
     });
+  }
+
+  /** Deletes the backing Firebase app. Idempotent; a no-op for a client without `close`. */
+  async close(): Promise<void> {
+    await this.#client.close?.();
   }
 }

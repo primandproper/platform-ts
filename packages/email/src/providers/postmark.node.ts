@@ -1,7 +1,6 @@
 import { wrap } from "@primandproper/errors";
 import {
   makeObserver,
-  type Logger,
   type ObservabilityDeps,
   type Observer,
 } from "@primandproper/observability";
@@ -13,6 +12,9 @@ import {
   type EmailMessage,
   type SendResult,
 } from "../email.js";
+import { senderInstruments, type SenderInstruments } from "../support.js";
+
+import { recipientDomain } from "./http.js";
 
 const o11yName = "email";
 
@@ -58,34 +60,42 @@ export interface PostmarkSendResponse {
 export class PostmarkEmail implements Email {
   readonly #client: PostmarkClientLike;
   readonly #observer: Observer;
-  readonly #logger: Logger;
+  readonly #instruments: SenderInstruments;
 
   constructor(options: PostmarkEmailOptions, deps: ObservabilityDeps = {}) {
     this.#client = options.client ?? new ServerClient(options.serverToken);
     this.#observer = deps.observer ?? makeObserver(o11yName, deps);
-    this.#logger = this.#observer.logger();
+    this.#instruments = senderInstruments(o11yName, deps);
   }
 
-  async send(message: EmailMessage): Promise<SendResult> {
-    assertHasBody(message);
+  send(message: EmailMessage): Promise<SendResult> {
+    return this.#observer.run("send", async (op) => {
+      assertHasBody(message);
+      op.set("recipientDomain", recipientDomain(message.to));
 
-    let response: PostmarkSendResponse;
-    try {
-      response = await this.#client.sendEmail(toPostmarkMessage(message));
-    } catch (cause) {
-      this.#logger.error("postmark send failed");
-      throw wrap("postmark send failed", cause);
-    }
+      let response: PostmarkSendResponse;
+      try {
+        response = await this.#client.sendEmail(toPostmarkMessage(message));
+      } catch (cause) {
+        this.#instruments.errors.add(1);
+        throw op.error(wrap("postmark send failed", cause), "postmark send failed");
+      }
 
-    if (response.ErrorCode !== undefined && response.ErrorCode !== 0) {
-      const detail = response.Message ?? "no message";
-      this.#logger.error(
-        `postmark send returned error code ${String(response.ErrorCode)}`,
-      );
-      throw new Error(`postmark send failed: ${String(response.ErrorCode)} ${detail}`);
-    }
+      if (response.ErrorCode !== undefined && response.ErrorCode !== 0) {
+        const detail = response.Message ?? "no message";
+        this.#instruments.errors.add(1);
+        throw op.error(
+          new Error(`postmark send failed: ${String(response.ErrorCode)} ${detail}`),
+          `postmark send returned error code ${String(response.ErrorCode)}`,
+        );
+      }
 
-    return response.MessageID === undefined ? {} : { id: response.MessageID };
+      if (response.MessageID !== undefined) {
+        op.set("requestId", response.MessageID);
+      }
+      this.#instruments.sends.add(1);
+      return response.MessageID === undefined ? {} : { id: response.MessageID };
+    });
   }
 
   async ping(): Promise<void> {

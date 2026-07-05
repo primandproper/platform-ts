@@ -16,6 +16,10 @@ export const RedisDistributedLockConfigSchema = z.object({
   keyPrefix: z.string().default(""),
   /** Default lease duration when {@link AcquireOptions.ttlMs} is omitted, in milliseconds. */
   defaultTtlMs: z.number().int().positive().default(30_000),
+  /** Reject a command that outlives this many ms — the fail-fast timeout knob. Off by default. */
+  commandTimeoutMs: z.number().int().positive().optional(),
+  /** TCP connect timeout in ms. Defaults to ioredis's 10s. */
+  connectTimeoutMs: z.number().int().positive().optional(),
 });
 
 export type RedisDistributedLockConfig = z.infer<typeof RedisDistributedLockConfigSchema>;

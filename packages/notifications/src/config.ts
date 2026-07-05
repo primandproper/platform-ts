@@ -6,7 +6,8 @@ export const PusherConfigSchema = z.object({
   key: z.string().min(1),
   secret: z.string().min(1),
   cluster: z.string().min(1),
-  secure: z.boolean().default(false),
+  /** Use TLS for the Pusher API connection. Secure by default; set `false` only for local dev. */
+  secure: z.boolean().default(true),
 });
 export type PusherConfig = z.infer<typeof PusherConfigSchema>;
 

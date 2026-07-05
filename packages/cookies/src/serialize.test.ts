@@ -104,4 +104,39 @@ describe("parseCookieHeader", () => {
     const header = serializeCookie("token", "héllo=&world").split("; ")[0];
     expect(parseCookieHeader(header ?? "").get("token")).toBe("héllo=&world");
   });
+
+  // COOK-1: hostile percent-encoding must degrade, not throw.
+  it("passes through malformed percent-encoding instead of throwing", () => {
+    expect(() => parseCookieHeader("a=%zz; b=2")).not.toThrow();
+    const parsed = parseCookieHeader("a=%zz; b=2");
+    expect(parsed.get("a")).toBe("%zz"); // raw value preserved
+    expect(parsed.get("b")).toBe("2"); // later pairs still parse
+  });
+});
+
+// COOK-2: attribute-grammar guards reject injection.
+describe("serializeCookie attribute injection (COOK-2)", () => {
+  it("rejects a name that would inject an attribute", () => {
+    expect(() => serializeCookie("a; Domain=evil.com", "v")).toThrow(
+      /invalid cookie name/,
+    );
+  });
+
+  it("rejects an injecting Domain", () => {
+    expect(() => serializeCookie("a", "v", { domain: "evil.com; Path=/" })).toThrow(
+      /invalid cookie Domain/,
+    );
+  });
+
+  it("rejects an injecting Path", () => {
+    expect(() => serializeCookie("a", "v", { path: "/; Domain=evil.com" })).toThrow(
+      /invalid cookie Path/,
+    );
+  });
+
+  it("rejects a NaN Max-Age", () => {
+    expect(() => serializeCookie("a", "v", { maxAge: Number.NaN })).toThrow(
+      /invalid cookie Max-Age/,
+    );
+  });
 });

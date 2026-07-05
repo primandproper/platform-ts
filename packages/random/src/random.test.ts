@@ -28,6 +28,15 @@ describe("encoding", () => {
     expect(bytesToBase64Url(new Uint8Array([0xfb, 0xff]))).toBe("-_8");
     expect(bytesToBase64Url(new Uint8Array())).toBe("");
   });
+
+  it("encodes a payload larger than the chunk size (PERF-4)", () => {
+    // A repeated byte across >0x8000 bytes: base64 of all-zero bytes is all "A"s, unpadded.
+    const bytes = new Uint8Array(0x8000 + 30); // 32798 bytes, all 0x00
+    const encoded = bytesToBase64Url(bytes);
+    // Every char is "A" (0x00 groups), unpadded, and never contains "+/=" or whitespace.
+    expect(/^A+$/.test(encoded)).toBe(true);
+    expect(encoded.length).toBe(Math.ceil((bytes.length * 8) / 6));
+  });
 });
 
 /**
