@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/httpclient",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "description": "Isomorphic HTTP client: a thin fetch wrapper with OpenTelemetry spans.",
   "license": "AGPL-3.0-or-later",

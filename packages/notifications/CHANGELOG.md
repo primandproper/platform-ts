@@ -1,5 +1,18 @@
 # @primandproper/notifications
 
+## 0.2.0
+
+### Minor Changes
+
+- a124406: Remove the `ErrPlatformNotSupported` export (replaced by `newPlatformNotSupportedError()` and `PLATFORM_NOT_SUPPORTED_MESSAGE`) and add a required `close()` to `PushNotificationSender`. Breaking for importers and implementers. The `secure` config default is now `true`.
+
+### Patch Changes
+
+- Updated dependencies [a124406]
+- Updated dependencies [a124406]
+  - @primandproper/errors@0.0.2
+  - @primandproper/observability@0.1.0
+
 ## 0.1.0
 
 ### Minor Changes

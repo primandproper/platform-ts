@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/errors",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "description": "Universal error utilities: message extraction, prefixed wrapping, and a typed PlatformError base.",
   "license": "AGPL-3.0-or-later",

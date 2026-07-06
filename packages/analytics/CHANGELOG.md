@@ -1,5 +1,13 @@
 # @primandproper/analytics
 
+## 0.1.1
+
+### Patch Changes
+
+- a124406: Add an optional `options` argument to `VendorReporter` (with `VendorReporterOptions`, background-error handling, and a default timeout).
+- Updated dependencies [a124406]
+  - @primandproper/observability@0.1.0
+
 ## 0.1.0
 
 ### Minor Changes

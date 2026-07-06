@@ -1,5 +1,18 @@
 # @primandproper/messagequeue
 
+## 0.2.0
+
+### Minor Changes
+
+- a124406: Make `Publisher.stop()` and `PublisherProvider.close()` async (now return `Promise<void>`) and add a required `close()` to `ConsumerProvider`. Breaking for callers and implementers.
+
+### Patch Changes
+
+- Updated dependencies [a124406]
+- Updated dependencies [a124406]
+  - @primandproper/errors@0.0.2
+  - @primandproper/observability@0.1.0
+
 ## 0.1.0
 
 ### Minor Changes

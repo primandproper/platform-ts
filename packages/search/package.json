@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/search",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Server-only search: text and vector index/search interfaces with swappable providers.",
   "license": "AGPL-3.0-or-later",
