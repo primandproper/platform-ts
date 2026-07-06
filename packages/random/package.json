@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/random",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "description": "Isomorphic cryptographically secure random generation (hex, base32, base64url) over WebCrypto with swappable providers.",
   "license": "AGPL-3.0-or-later",

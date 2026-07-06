@@ -1,5 +1,16 @@
 # @primandproper/cryptography
 
+## 0.2.0
+
+### Minor Changes
+
+- a124406: Add a required `readonly authenticated: boolean` member to the `Encryptor` interface. Breaking for external `Encryptor` implementers. AES-GCM now validates key length at construction.
+
+### Patch Changes
+
+- Updated dependencies [a124406]
+  - @primandproper/observability@0.1.0
+
 ## 0.1.0
 
 ### Minor Changes
