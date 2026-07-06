@@ -36,3 +36,37 @@ jobs:
 
       - name: ${{ matrix.task }}
         run: pnpm run ${{ matrix.task }}
+
+  # Fail a PR that ships code without declaring a release intent. `changeset
+  # status` on 2.x exits 0 even with zero changesets, so we read its JSON and
+  # fail when nothing would be bumped. For a deliberately release-neutral PR
+  # (docs, CI, chore), add an empty changeset: `pnpm changeset --empty`.
+  changeset:
+    name: changeset
+    # Only PRs need a changeset; a push to main is the merge itself.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # `--since` needs history and the base branch
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Require a changeset
+        run: |
+          pnpm changeset status --since=origin/${{ github.base_ref }} --output=changeset-status.json
+          count=$(node -p "require('./changeset-status.json').releases.length")
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No changeset found on this branch. Run 'pnpm changeset' to describe the release, or 'pnpm changeset --empty' for a release-neutral change."
+            exit 1
+          fi
+          echo "$count package(s) will be released. 🦋"
