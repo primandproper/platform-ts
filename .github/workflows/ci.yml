@@ -39,12 +39,17 @@ jobs:
 
   # Fail a PR that ships code without declaring a release intent. `changeset
   # status` on 2.x exits 0 even with zero changesets, so we read its JSON and
-  # fail when nothing would be bumped. For a deliberately release-neutral PR
-  # (docs, CI, chore), add an empty changeset: `pnpm changeset --empty`.
+  # fail when no changeset was declared. For a deliberately release-neutral PR
+  # (docs, CI, chore), add an empty changeset: `pnpm changeset --empty`. We key
+  # off `changesets.length` (was a changeset declared?) rather than
+  # `releases.length` (would anything be bumped?), because an empty changeset
+  # bumps nothing yet is still a valid, deliberate declaration.
   changeset:
     name: changeset
-    # Only PRs need a changeset; a push to main is the merge itself.
-    if: github.event_name == 'pull_request'
+    # Only PRs need a changeset; a push to main is the merge itself. The
+    # Changesets "Version Packages" PR (from changeset-release/main) is exempt:
+    # it *consumes* changesets, so requiring one there is a self-defeating loop.
+    if: github.event_name == 'pull_request' && github.head_ref != 'changeset-release/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,9 +69,10 @@ jobs:
       - name: Require a changeset
         run: |
           pnpm changeset status --since=origin/${{ github.base_ref }} --output=changeset-status.json
-          count=$(node -p "require('./changeset-status.json').releases.length")
-          if [ "$count" -eq 0 ]; then
+          declared=$(node -p "require('./changeset-status.json').changesets.length")
+          if [ "$declared" -eq 0 ]; then
             echo "::error::No changeset found on this branch. Run 'pnpm changeset' to describe the release, or 'pnpm changeset --empty' for a release-neutral change."
             exit 1
           fi
-          echo "$count package(s) will be released. 🦋"
+          releases=$(node -p "require('./changeset-status.json').releases.length")
+          echo "$declared changeset(s) declared; $releases package(s) will be released. 🦋"
