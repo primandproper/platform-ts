@@ -1,11 +1,34 @@
 /**
+ * Per-write overrides. An options bag rather than a positional argument because it is the
+ * extension point that will keep being asked for (`ifNotExists`, tags), and widening an object
+ * is not a breaking change.
+ */
+export interface CacheSetOptions {
+  /**
+   * Overrides the cache's configured expiry for this entry, in milliseconds.
+   *
+   * Omitted, `0`, or negative all mean **"ignore this, keep the provider's configured expiry"** —
+   * matching the Go platform's `WithExpiry` option setters. There is deliberately no per-entry way
+   * to say "never expire": a cache configured with an expiry is expected to honour it, and a
+   * caller that wants an immortal entry configures the cache without one. Stating the rule here is
+   * the point — providers would otherwise disagree, since "no expiry" is equally defensible.
+   */
+  ttlMs?: number;
+}
+
+/**
  * The universal cache contract. A miss is represented by `undefined` rather than a sentinel
  * error — the idiomatic-TypeScript divergence from the Go platform's `cache.ErrNotFound`.
  */
 export interface Cache<T> {
   /** Returns the cached value, or `undefined` on a miss. */
   get(key: string): Promise<T | undefined>;
-  set(key: string, value: T): Promise<void>;
+  /**
+   * Writes a value, optionally with a lifetime of its own. Two entries written through the same
+   * cache instance may carry different TTLs — a short-lived claim and a long-lived result, say.
+   * See {@link CacheSetOptions.ttlMs} for what an absent or non-positive TTL means.
+   */
+  set(key: string, value: T, opts?: CacheSetOptions): Promise<void>;
   delete(key: string): Promise<void>;
   /** Verifies the backing store is reachable. */
   ping(): Promise<void>;
@@ -24,7 +47,12 @@ export interface Cache<T> {
  */
 export interface BatchCache<T> extends Cache<T> {
   getMany(keys: string[]): Promise<Map<string, T>>;
-  setMany(items: Map<string, T>): Promise<void>;
+  /**
+   * Writes every item, applying one {@link CacheSetOptions.ttlMs} to the whole batch. Per-item
+   * TTLs are not offered — a caller that needs them can issue separate `set` calls, and the batch
+   * exists to save round trips, which mixed TTLs would not prevent but would complicate.
+   */
+  setMany(items: Map<string, T>, opts?: CacheSetOptions): Promise<void>;
 }
 
 /** Narrows a {@link Cache} to a {@link BatchCache} when the provider supports batching. */

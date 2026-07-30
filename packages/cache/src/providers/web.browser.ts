@@ -4,8 +4,13 @@ import {
   type Observer,
 } from "@primandproper/observability";
 
-import type { Cache } from "../cache.js";
-import { cacheInstruments, type CacheInstruments } from "../support.js";
+import type { Cache, CacheSetOptions } from "../cache.js";
+import {
+  cacheInstruments,
+  normalizeExpiryMs,
+  resolveTtlMs,
+  type CacheInstruments,
+} from "../support.js";
 
 const o11yName = "cache";
 
@@ -16,7 +21,10 @@ interface StoredEntry<T> {
 
 export interface WebStorageCacheOptions {
   namespace?: string;
-  /** Per-entry TTL in milliseconds. `0` or omitted disables expiry. */
+  /**
+   * Default TTL in milliseconds applied to entries written without their own. `0` or omitted
+   * disables expiry. Individual writes override it via `set`'s {@link CacheSetOptions.ttlMs}.
+   */
   expiryMs?: number;
   /** Storage backend; defaults to `localStorage`. Pass `sessionStorage` to opt in. */
   storage?: Storage;
@@ -33,10 +41,7 @@ export class WebStorageCache<T> implements Cache<T> {
   constructor(options: WebStorageCacheOptions = {}, deps: ObservabilityDeps = {}) {
     this.#storage = options.storage ?? globalThis.localStorage;
     this.#namespace = options.namespace ?? "cache";
-    this.#expiryMs =
-      options.expiryMs !== undefined && options.expiryMs > 0
-        ? options.expiryMs
-        : undefined;
+    this.#expiryMs = normalizeExpiryMs(options.expiryMs);
     this.#observer = deps.observer ?? makeObserver(o11yName, deps);
     this.#instruments = cacheInstruments(o11yName, deps);
   }
@@ -72,10 +77,11 @@ export class WebStorageCache<T> implements Cache<T> {
     });
   }
 
-  set(key: string, value: T): Promise<void> {
+  set(key: string, value: T, opts?: CacheSetOptions): Promise<void> {
     return this.#observer.run("set", (op) => {
       op.set("key", key);
-      const expiresAt = this.#expiryMs === undefined ? null : Date.now() + this.#expiryMs;
+      const ttlMs = resolveTtlMs(opts, this.#expiryMs);
+      const expiresAt = ttlMs === undefined ? null : Date.now() + ttlMs;
       const entry: StoredEntry<T> = { value, expiresAt };
       try {
         this.#storage.setItem(this.#key(key), JSON.stringify(entry));

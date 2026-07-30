@@ -4,8 +4,13 @@ import {
   type Observer,
 } from "@primandproper/observability";
 
-import type { BatchCache } from "../cache.js";
-import { cacheInstruments, type CacheInstruments } from "../support.js";
+import type { BatchCache, CacheSetOptions } from "../cache.js";
+import {
+  cacheInstruments,
+  normalizeExpiryMs,
+  resolveTtlMs,
+  type CacheInstruments,
+} from "../support.js";
 
 const o11yName = "cache";
 
@@ -18,7 +23,10 @@ interface Entry<T> {
 const DEFAULT_MAX_ENTRIES = 100_000;
 
 export interface MemoryCacheOptions {
-  /** Per-entry TTL in milliseconds. `0` or omitted disables expiry. */
+  /**
+   * Default TTL in milliseconds applied to entries written without their own. `0` or omitted
+   * disables expiry. Individual writes override it via `set`'s {@link CacheSetOptions.ttlMs}.
+   */
   expiryMs?: number;
   /**
    * Maximum number of live entries. When a new key would exceed it, expired entries are swept
@@ -37,6 +45,13 @@ export interface MemoryCacheOptions {
  * Redis provider gets for free from serialization. NOTE: `structuredClone` preserves `Date`/`Map`/
  * `Set` that the Redis provider's JSON round-trip would mangle, so a value's *type fidelity* still
  * differs between the two providers — don't rely on either beyond JSON-safe shapes for portability.
+ *
+ * EXPIRY IS LAZY. There is no background janitor: an expired entry is dropped when it is next read,
+ * or swept in bulk when a write finds the store at `maxEntries`. Total memory is therefore bounded
+ * by `maxEntries` rather than by the TTLs — a write-heavy, read-light workload (the shape of an
+ * idempotency record store) holds expired entries until it reaches the cap, then reclaims them.
+ * That is a memory-footprint trade, not a correctness one: a read never returns an expired value.
+ * Size the cap accordingly, or use a provider with server-side expiry when the keyspace is large.
  */
 export class InMemoryCache<T> implements BatchCache<T> {
   readonly #store = new Map<string, Entry<T>>();
@@ -46,10 +61,7 @@ export class InMemoryCache<T> implements BatchCache<T> {
   readonly #instruments: CacheInstruments;
 
   constructor(options: MemoryCacheOptions = {}, deps: ObservabilityDeps = {}) {
-    this.#expiryMs =
-      options.expiryMs !== undefined && options.expiryMs > 0
-        ? options.expiryMs
-        : undefined;
+    this.#expiryMs = normalizeExpiryMs(options.expiryMs);
     this.#maxEntries =
       options.maxEntries === undefined
         ? DEFAULT_MAX_ENTRIES
@@ -81,11 +93,11 @@ export class InMemoryCache<T> implements BatchCache<T> {
     });
   }
 
-  set(key: string, value: T): Promise<void> {
+  set(key: string, value: T, opts?: CacheSetOptions): Promise<void> {
     return this.#observer.run("set", (op) => {
       op.set("key", key);
-      const expiresAt =
-        this.#expiryMs === undefined ? undefined : Date.now() + this.#expiryMs;
+      const ttlMs = resolveTtlMs(opts, this.#expiryMs);
+      const expiresAt = ttlMs === undefined ? undefined : Date.now() + ttlMs;
       if (!this.#store.has(key)) {
         this.#evictIfNeeded();
       }
@@ -142,9 +154,9 @@ export class InMemoryCache<T> implements BatchCache<T> {
     return found;
   }
 
-  async setMany(items: Map<string, T>): Promise<void> {
+  async setMany(items: Map<string, T>, opts?: CacheSetOptions): Promise<void> {
     for (const [key, value] of items) {
-      await this.set(key, value);
+      await this.set(key, value, opts);
     }
   }
 }

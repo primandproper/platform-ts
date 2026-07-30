@@ -6,8 +6,13 @@ import {
 } from "@primandproper/observability";
 import { Redis } from "ioredis";
 
-import type { BatchCache } from "../cache.js";
-import { cacheInstruments, type CacheInstruments } from "../support.js";
+import type { BatchCache, CacheSetOptions } from "../cache.js";
+import {
+  cacheInstruments,
+  normalizeExpiryMs,
+  resolveTtlMs,
+  type CacheInstruments,
+} from "../support.js";
 
 const o11yName = "cache";
 
@@ -53,26 +58,31 @@ export function buildRedisClient(options: RedisClientOptions): {
 
 export interface RedisCacheOptions extends RedisClientOptions {
   keyPrefix?: string;
-  /** Per-entry TTL in milliseconds. `0` or omitted disables expiry. */
+  /**
+   * Default TTL in milliseconds applied to entries written without their own. `0` or omitted
+   * disables expiry. Individual writes override it via `set`'s {@link CacheSetOptions.ttlMs}.
+   */
   expiryMs?: number;
 }
 
-/** Node-only provider backed by Redis (ioredis). Values are JSON-encoded. */
+/**
+ * Node-only provider backed by Redis (ioredis). Values are JSON-encoded.
+ *
+ * Expiry is applied with `PX` (milliseconds) rather than `EX` (seconds) so a TTL survives the
+ * round trip at the precision the interface advertises — `EX` would round 1500ms up to 2s.
+ */
 export class RedisCache<T> implements BatchCache<T> {
   readonly #client: Redis;
   readonly #ownsClient: boolean;
   readonly #prefix: string;
-  readonly #ttlSeconds: number | undefined;
+  readonly #expiryMs: number | undefined;
   readonly #observer: Observer;
   readonly #instruments: CacheInstruments;
 
   constructor(options: RedisCacheOptions, deps: ObservabilityDeps = {}) {
     ({ client: this.#client, owned: this.#ownsClient } = buildRedisClient(options));
     this.#prefix = options.keyPrefix ?? "";
-    this.#ttlSeconds =
-      options.expiryMs !== undefined && options.expiryMs > 0
-        ? Math.ceil(options.expiryMs / 1000)
-        : undefined;
+    this.#expiryMs = normalizeExpiryMs(options.expiryMs);
     this.#observer = deps.observer ?? makeObserver(o11yName, deps);
     this.#instruments = cacheInstruments(o11yName, deps);
   }
@@ -106,7 +116,7 @@ export class RedisCache<T> implements BatchCache<T> {
     });
   }
 
-  set(key: string, value: T): Promise<void> {
+  set(key: string, value: T, opts?: CacheSetOptions): Promise<void> {
     return this.#observer.run("set", async (op) => {
       op.set("key", key);
       let payload: string;
@@ -115,11 +125,12 @@ export class RedisCache<T> implements BatchCache<T> {
       } catch (err) {
         throw wrap(`cache: failed to encode value for ${key}`, err);
       }
+      const ttlMs = resolveTtlMs(opts, this.#expiryMs);
       try {
-        if (this.#ttlSeconds === undefined) {
+        if (ttlMs === undefined) {
           await this.#client.set(this.#key(key), payload);
         } else {
-          await this.#client.set(this.#key(key), payload, "EX", this.#ttlSeconds);
+          await this.#client.set(this.#key(key), payload, "PX", ttlMs);
         }
       } catch (err) {
         throw wrap(`cache: failed to set ${key} on redis`, err);
@@ -172,12 +183,13 @@ export class RedisCache<T> implements BatchCache<T> {
     });
   }
 
-  setMany(items: Map<string, T>): Promise<void> {
+  setMany(items: Map<string, T>, opts?: CacheSetOptions): Promise<void> {
     return this.#observer.run("setMany", async (op) => {
       op.set("keys", items.size);
       if (items.size === 0) {
         return;
       }
+      const ttlMs = resolveTtlMs(opts, this.#expiryMs);
       // Queue every write on one pipeline so the batch costs a single round trip.
       const pipeline = this.#client.pipeline();
       for (const [key, value] of items) {
@@ -187,10 +199,10 @@ export class RedisCache<T> implements BatchCache<T> {
         } catch (err) {
           throw wrap(`cache: failed to encode value for ${key}`, err);
         }
-        if (this.#ttlSeconds === undefined) {
+        if (ttlMs === undefined) {
           pipeline.set(this.#key(key), payload);
         } else {
-          pipeline.set(this.#key(key), payload, "EX", this.#ttlSeconds);
+          pipeline.set(this.#key(key), payload, "PX", ttlMs);
         }
       }
       let results: [error: Error | null, result: unknown][] | null;

@@ -41,6 +41,42 @@ describe("WebStorageCache corrupt entry (CACHE-1)", () => {
   });
 });
 
+describe("WebStorageCache per-entry TTL", () => {
+  const sleep = (ms: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+  it("expires an entry at its own ttl and drops it from storage", async () => {
+    const storage = fakeStorage();
+    const cache = new WebStorageCache<number>({ namespace: "ns", storage });
+
+    await cache.set("k", 1, { ttlMs: 10 });
+    await sleep(50);
+
+    expect(await cache.get("k")).toBeUndefined();
+    expect(storage.getItem("ns:k")).toBeNull(); // the expired entry is reclaimed, not just hidden
+  });
+
+  it("keeps a long-lived entry while a short-lived one expires", async () => {
+    const cache = new WebStorageCache<number>({ storage: fakeStorage() });
+
+    await cache.set("claim", 1, { ttlMs: 10 });
+    await cache.set("record", 2, { ttlMs: 60_000 });
+    await sleep(50);
+
+    expect(await cache.get("claim")).toBeUndefined();
+    expect(await cache.get("record")).toBe(2);
+  });
+
+  it("falls back to the configured expiry when ttlMs is non-positive", async () => {
+    const cache = new WebStorageCache<number>({ storage: fakeStorage(), expiryMs: 10 });
+
+    await cache.set("k", 1, { ttlMs: 0 });
+    await sleep(50);
+
+    expect(await cache.get("k")).toBeUndefined();
+  });
+});
+
 describe("WebStorageCache quota handling (CACHE-3)", () => {
   it("degrades a QuotaExceededError to a skipped set instead of throwing", async () => {
     const storage = fakeStorage();
