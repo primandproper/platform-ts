@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { PlatformError } from "@primandproper/errors";
 import {
   makeObserver,
@@ -33,13 +35,39 @@ export interface QueryResult {
 }
 
 /**
+ * Anything statements can be issued through: a pool, or the pinned connection a transaction runs
+ * on. It is deliberately the *whole* surface — no `end()`, no commit, no rollback — so a function
+ * written against `Queryable` composes with either, and holding one inside
+ * {@link DatabaseClient.withTransaction} grants no way to end the transaction or the pool.
+ */
+export interface Queryable {
+  query(text: string, params?: readonly unknown[]): Promise<QueryResult>;
+}
+
+/**
+ * A connection checked out of a pool and pinned for the life of a transaction. Returned by
+ * {@link QueryablePool.connect} and released by {@link DatabaseClient.withTransaction}, never by
+ * the caller — which is why it never reaches the transaction callback.
+ */
+export interface PooledConnection extends Queryable {
+  /** Returns the connection to its pool. Idempotent in every adapter here. */
+  release(): void | Promise<void>;
+}
+
+/**
  * The minimal pool surface this package instruments — the seam a query builder (Drizzle/Kysely) or
  * raw SQL sits on. Driver pools are adapted to it by the functions in `adapters.ts`.
  */
-export interface QueryablePool {
-  query(text: string, params?: readonly unknown[]): Promise<QueryResult>;
+export interface QueryablePool extends Queryable {
   /** Drains and closes the pool. */
   end(): Promise<void>;
+  /**
+   * Checks out a connection pinned to the caller. Optional because the seam is structural: a pool
+   * that cannot pin a connection cannot run a transaction, and {@link DatabaseClient.withTransaction}
+   * rejects with {@link TransactionsUnsupportedError} rather than silently spreading the statements
+   * across arbitrary pooled connections — which is the failure that looks like it worked.
+   */
+  connect?(): Promise<PooledConnection>;
 }
 
 /**
@@ -62,12 +90,34 @@ export interface DatabaseClient {
   close(): Promise<void>;
   /** The client's notion of "now", injectable for tests. */
   currentTime(): Date;
-  /** Runs a statement on `pool` inside an observability span. */
+  /**
+   * Runs a statement on `target` inside an observability span. Accepts the narrow {@link Queryable},
+   * so statements issued inside {@link withTransaction} are instrumented the same way pool queries are.
+   */
   query(
-    pool: QueryablePool,
+    target: Queryable,
     text: string,
     params?: readonly unknown[],
   ): Promise<QueryResult>;
+  /**
+   * Runs `fn` inside a single transaction on the **write** pool, on one pinned connection.
+   * Resolving commits; rejecting rolls back and re-throws the original error unchanged.
+   *
+   * `fn` receives a bare {@link Queryable} and nothing else: it cannot commit, roll back, close
+   * the pool, or outlive the closure. Lifecycle belongs to this method, which acquires the
+   * connection and releases it in a `finally` — including when the rollback itself fails.
+   *
+   * Nesting is **not** supported and throws {@link NestedTransactionError} rather than silently
+   * flattening two scopes into one (there are no savepoints). Detection is per async context, so
+   * genuinely concurrent transactions on the same client are unaffected, and nesting a *different*
+   * client's transaction inside this one is allowed — two databases have no shared commit and this
+   * package does not pretend otherwise.
+   *
+   * A failed commit throws {@link TransactionCommitError} and does not attempt a rollback: the
+   * driver has already ended the transaction and returned the connection, so a second attempt would
+   * only surface a spurious "no transaction in progress".
+   */
+  withTransaction<T>(fn: (q: Queryable) => Promise<T>): Promise<T>;
 }
 
 /** Thrown when a client is used before its pools are reachable. */
@@ -78,6 +128,47 @@ export class DatabaseNotReadyError extends PlatformError {
   }
 }
 
+/** Thrown by {@link DatabaseClient.withTransaction} when the write pool cannot pin a connection. */
+export class TransactionsUnsupportedError extends PlatformError {
+  constructor(provider: string) {
+    super(
+      "database/transactions-unsupported",
+      `the ${provider} write pool does not expose connect(), so it cannot run a transaction`,
+    );
+    this.name = "TransactionsUnsupportedError";
+  }
+}
+
+/** Thrown when {@link DatabaseClient.withTransaction} is called inside its own transaction. */
+export class NestedTransactionError extends PlatformError {
+  constructor() {
+    super(
+      "database/nested-transaction",
+      "withTransaction cannot be nested on the same client; savepoints are not supported",
+    );
+    this.name = "NestedTransactionError";
+  }
+}
+
+/**
+ * Thrown when `COMMIT` fails. Distinct from an error thrown by the callback because the outcome is
+ * different in kind: the callback's work provably did not land, whereas a failed commit leaves the
+ * transaction's fate unknown to this process. The driver error is the `cause`.
+ */
+export class TransactionCommitError extends PlatformError {
+  constructor(cause: Error) {
+    super("database/commit-failed", "committing transaction", { cause });
+    this.name = "TransactionCommitError";
+  }
+}
+
+/**
+ * The clients whose transactions are open in the current async context. Async-context-scoped rather
+ * than a field on the client, because a per-instance flag would call two concurrent requests a
+ * nesting violation — the common case — while still missing a genuine nest across an `await`.
+ */
+const openTransactions = new AsyncLocalStorage<ReadonlySet<DatabaseClient>>();
+
 /** Observability plus the injectable runtime knobs the client uses. */
 export interface DatabaseClientDeps extends ObservabilityDeps {
   /** Overrides `Date` for {@link DatabaseClient.currentTime}; injectable for tests. */
@@ -86,6 +177,13 @@ export interface DatabaseClientDeps extends ObservabilityDeps {
   sleep?: (ms: number) => Promise<void>;
   /** The statement used to probe readiness. Defaults to `SELECT 1`. */
   pingQuery?: string;
+  /**
+   * The statement that opens a transaction. Defaults to `BEGIN`, which postgres, mysql, and sqlite
+   * all accept. Override it where the dialect's default locking mode is wrong for the workload —
+   * sqlite's `BEGIN IMMEDIATE` takes the write lock up front instead of failing with `SQLITE_BUSY`
+   * when a deferred transaction tries to upgrade mid-flight.
+   */
+  beginStatement?: string;
 }
 
 class InstrumentedClient implements DatabaseClient {
@@ -97,6 +195,7 @@ class InstrumentedClient implements DatabaseClient {
   readonly #now: () => Date;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #pingQuery: string;
+  readonly #beginStatement: string;
 
   constructor(
     readPool: QueryablePool,
@@ -112,6 +211,7 @@ class InstrumentedClient implements DatabaseClient {
     this.#now = deps.now ?? ((): Date => new Date());
     this.#sleep = deps.sleep ?? defaultSleep;
     this.#pingQuery = deps.pingQuery ?? "SELECT 1";
+    this.#beginStatement = deps.beginStatement ?? "BEGIN";
   }
 
   async isReady(): Promise<boolean> {
@@ -185,14 +285,14 @@ class InstrumentedClient implements DatabaseClient {
   }
 
   async query(
-    pool: QueryablePool,
+    target: Queryable,
     text: string,
     params?: readonly unknown[],
   ): Promise<QueryResult> {
     const op = this.#observer.begin(`${o11yName}.query`);
     try {
       op.set("db.system", this.#config.provider).set("db.statement", text);
-      const result = await pool.query(text, params);
+      const result = await target.query(text, params);
       op.set("db.rows", result.rows.length);
       return result;
     } catch (error) {
@@ -200,6 +300,80 @@ class InstrumentedClient implements DatabaseClient {
       throw error;
     } finally {
       op.end();
+    }
+  }
+
+  async withTransaction<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
+    const enclosing = openTransactions.getStore();
+    if (enclosing?.has(this)) throw new NestedTransactionError();
+
+    // The write pool only. A transaction on the read pool targets a replica, where it either fails
+    // outright or reads a stale snapshot and discards every write in it.
+    const pool = this.writePool;
+    if (typeof pool.connect !== "function") {
+      throw new TransactionsUnsupportedError(this.#config.provider);
+    }
+
+    const op = this.#observer.begin(`${o11yName}.withTransaction`);
+    op.set("db.system", this.#config.provider);
+    let connection: PooledConnection | undefined;
+    try {
+      connection = await pool.connect();
+      await connection.query(this.#beginStatement);
+      const pinned = connection;
+
+      let value: T;
+      try {
+        // Re-wrap rather than passing `pinned` straight through: the connection carries `release()`,
+        // and the callback holding an object it must not call is a weaker guarantee than it not
+        // holding one at all.
+        const scope = new Set(enclosing ?? []).add(this);
+        value = await openTransactions.run(scope, () =>
+          fn({ query: (text, params) => pinned.query(text, params) }),
+        );
+      } catch (error) {
+        await this.#rollback(pinned, toError(error));
+        throw error;
+      }
+
+      try {
+        await pinned.query("COMMIT");
+      } catch (error) {
+        throw new TransactionCommitError(toError(error));
+      }
+      return value;
+    } catch (error) {
+      op.error(toError(error), "transaction failed");
+      throw error;
+    } finally {
+      // Release even when BEGIN, the callback, the rollback, or the commit failed — one connection
+      // leaked per transaction exhausts the pool, and presents as unrelated latency far from here.
+      if (connection !== undefined) await this.#release(connection);
+      op.end();
+    }
+  }
+
+  /**
+   * Rolls back, swallowing any failure. The error that caused the rollback is what the caller needs;
+   * replacing it with the cleanup failure would discard the diagnosis, so the cleanup failure is
+   * logged with its cause attached instead.
+   */
+  async #rollback(connection: PooledConnection, cause: Error): Promise<void> {
+    try {
+      await connection.query("ROLLBACK");
+    } catch (err) {
+      this.#logger.error("rolling back transaction", toError(err), {
+        rollbackCause: cause.message,
+      });
+    }
+  }
+
+  /** Releases the connection, logging rather than throwing so it cannot mask the caller's error. */
+  async #release(connection: PooledConnection): Promise<void> {
+    try {
+      await connection.release();
+    } catch (err) {
+      this.#logger.error("releasing transaction connection", toError(err));
     }
   }
 }
