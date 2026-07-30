@@ -67,6 +67,19 @@ export default tseslint.config(
     },
   },
   {
+    // eventcapture is isomorphic: everything except the `*.node.ts` providers (and the tests
+    // that drive them) is shared by both builds, so the shared core must stay Node-free even
+    // though the package as a whole is not Universal.
+    files: ["packages/eventcapture/src/**/*.ts"],
+    ignores: [
+      "packages/eventcapture/src/**/*.node.ts",
+      "packages/eventcapture/src/**/*.test.ts",
+    ],
+    rules: {
+      "no-restricted-imports": ["error", nodeBuiltinBan],
+    },
+  },
+  {
     files: ["**/*.test.ts"],
     rules: {
       "@typescript-eslint/no-non-null-assertion": "off",

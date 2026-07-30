@@ -41,6 +41,7 @@ logic, one build), **isomorphic** (same import resolves per-environment), **serv
 | `@primandproper/ratelimiting`  | `RateLimiter` interface with swappable providers                        |
 | `@primandproper/eventstream`   | `EventStream` over SSE and WebSocket                                    |
 | `@primandproper/analytics`     | `EventReporter` interface with swappable providers                      |
+| `@primandproper/eventcapture`  | Non-blocking high-volume event capture draining to a swappable sink     |
 
 ### Server-only
 
