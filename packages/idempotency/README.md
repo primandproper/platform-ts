@@ -97,7 +97,7 @@ switch (result.status) {
 The four outcomes are **returned, not thrown**: they are expected control flow, and the
 discriminated union fits this repo's optional-over-sentinels stance better than Go's error
 sentinels. Thrown `PlatformError`s (`idempotency/*` codes) are reserved for genuine failures — an
-unusable key, an empty fingerprint, an unreachable record store under `fail-closed`.
+unusable key, an empty fingerprint, an unreachable record store.
 
 ## The claim protocol
 
@@ -147,15 +147,21 @@ process blocks a retry, which is a property of the deployment rather than of the
 ## Store failure policy
 
 The two answers fail in opposite directions, so the choice belongs to the caller.
-`fail-closed` (the default) refuses the request when the record store is unreachable: a brief
-outage becomes downtime rather than duplicate charges, which is the right answer wherever the
-guarded work costs money. `fail-open` runs the work anyway, trading the guarantee for
-availability.
+`fail-closed` (the default) refuses the request when a record read fails: a brief outage becomes
+downtime rather than duplicate charges, which is the right answer wherever the guarded work costs
+money. `fail-open` treats the failed read as a miss and runs the work anyway, trading the
+guarantee for availability.
 
-The policy covers **reads, claim writes, and lock failures** alike. (platform-go applies it to
-reads only, so a `FailOpen` manager still rejects when the claim write fails; that is a divergence
-this port makes deliberately — a policy that only holds for reads is not the promise its name
-makes.)
+**The policy governs reads only**, matching platform-go. A read can fail open because "no record"
+is a coherent — if unprotected — answer to carry on from. A claim that could not be _written_
+leaves the completion nothing to prove ownership against, so a failed claim write, or an
+unreachable locker, refuses the request under either policy.
+
+The practical consequence is worth stating plainly: a store that is _wholly_ unreachable refuses
+the request even under `fail-open`, because the claim write cannot land either. What `fail-open`
+buys is tolerance of a failing **read** path — and in that case the completion write is also
+skipped (the claim cannot be confirmed as ours), so the execution counts against
+`idempotency.claims.lost` and a later retry will re-run the work.
 
 ## The locker matters
 

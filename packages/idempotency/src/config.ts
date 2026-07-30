@@ -41,13 +41,19 @@ export const IdempotencyConfigSchema = z.object({
   /** The longest client key accepted. `0` disables the length check. */
   maxKeyLength: z.number().int().nonnegative().default(DEFAULT_MAX_KEY_LENGTH),
   /**
-   * What happens when the record store cannot be reached. The most consequential setting here,
-   * because the two answers fail in opposite directions.
+   * What happens when a record **read** fails. The most consequential setting here, because the
+   * two answers fail in opposite directions.
    *
    * `fail-closed` (the default) refuses the request: a brief outage becomes downtime rather than
    * duplicate charges, and it is the right answer wherever the guarded work costs money.
-   * `fail-open` runs the work anyway, trading the guarantee for availability — appropriate only
-   * where a duplicate effect is cheaper than a rejection.
+   * `fail-open` treats the failed read as a miss and runs the work anyway, trading the guarantee
+   * for availability — appropriate only where a duplicate effect is cheaper than a rejection.
+   *
+   * It governs reads only, matching platform-go. A claim that could not be *written* leaves the
+   * completion nothing to prove ownership against, so a failed claim write (or an unreachable
+   * locker) refuses the request under either policy. In practice that means a store which is
+   * wholly unreachable refuses the request even under `fail-open`; what `fail-open` buys is
+   * tolerance of a failing read path.
    */
   storeFailurePolicy: z.enum(["fail-closed", "fail-open"]).default("fail-closed"),
   /**

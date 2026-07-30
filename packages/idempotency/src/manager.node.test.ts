@@ -454,7 +454,62 @@ describe("store failure policy", () => {
     expect(work).not.toHaveBeenCalled();
   });
 
-  it("fail-open runs the work anyway, trading the guarantee for availability", async () => {
+  it("fail-open treats a failed read as a miss and runs the work", async () => {
+    const clock = fakeClock();
+    const store = new FakeStore<IdempotencyRecord<Receipt>>(clock.now);
+    // Reads fail, writes still land — the shape fail-open exists for.
+    vi.spyOn(store, "get").mockRejectedValue(new Error("redis read timeout"));
+    const { manager } = makeManager({
+      clock,
+      store,
+      config: { storeFailurePolicy: "fail-open" },
+    });
+    const work = vi.fn(() => receipt());
+
+    await expect(manager.run(KEY, FINGERPRINT, work)).resolves.toEqual({
+      status: "executed",
+      value: receipt(),
+    });
+    expect(work).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a failed claim write under either policy — the policy governs reads only", async () => {
+    // A claim that could not be written leaves the completion nothing to prove ownership
+    // against, so there is no state in which running the work is a defensible guess. Matching
+    // platform-go, which lets a Set failure fail the request regardless of FailOpen.
+    for (const storeFailurePolicy of ["fail-closed", "fail-open"] as const) {
+      const clock = fakeClock();
+      const store = new FakeStore<IdempotencyRecord<Receipt>>(clock.now);
+      vi.spyOn(store, "set").mockRejectedValue(new Error("redis is down"));
+      const { manager } = makeManager({ clock, store, config: { storeFailurePolicy } });
+      const work = vi.fn(() => receipt());
+
+      await expect(manager.run(KEY, FINGERPRINT, work)).rejects.toSatisfy((err) =>
+        isPlatformError(err, IdempotencyErrorCode.storeUnavailable),
+      );
+      expect(work).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses when the locker itself fails, under either policy", async () => {
+    const lock: DistributedLock = {
+      acquire: () => Promise.reject(new Error("lock store down")),
+      ping: () => Promise.resolve(),
+      close: () => Promise.resolve(),
+    };
+
+    for (const storeFailurePolicy of ["fail-closed", "fail-open"] as const) {
+      const { manager } = makeManager({ lock, config: { storeFailurePolicy } });
+      const work = vi.fn(() => receipt());
+
+      await expect(manager.run(KEY, FINGERPRINT, work)).rejects.toSatisfy((err) =>
+        isPlatformError(err, IdempotencyErrorCode.storeUnavailable),
+      );
+      expect(work).not.toHaveBeenCalled();
+    }
+  });
+
+  it("fail-open on a wholly unreachable store still refuses, because the claim cannot land", async () => {
     const clock = fakeClock();
     const store = new FakeStore<IdempotencyRecord<Receipt>>(clock.now);
     const { manager } = makeManager({
@@ -465,56 +520,10 @@ describe("store failure policy", () => {
     store.failure = new Error("redis is down");
     const work = vi.fn(() => receipt());
 
-    await expect(manager.run(KEY, FINGERPRINT, work)).resolves.toEqual({
-      status: "executed",
-      value: receipt(),
-    });
-    expect(work).toHaveBeenCalledOnce();
-  });
-
-  it("applies the policy to a failed claim write too, not only to reads", async () => {
-    const clock = fakeClock();
-    const failingWrites = new FakeStore<IdempotencyRecord<Receipt>>(clock.now);
-    vi.spyOn(failingWrites, "set").mockRejectedValue(new Error("redis is down"));
-
-    const closed = makeManager({ clock, store: failingWrites }).manager;
-    await expect(closed.run(KEY, FINGERPRINT, () => receipt())).rejects.toSatisfy((err) =>
+    await expect(manager.run(KEY, FINGERPRINT, work)).rejects.toSatisfy((err) =>
       isPlatformError(err, IdempotencyErrorCode.storeUnavailable),
     );
-
-    const open = makeManager({
-      clock,
-      store: failingWrites,
-      config: { storeFailurePolicy: "fail-open" },
-    }).manager;
-    await expect(open.run(KEY, FINGERPRINT, () => receipt())).resolves.toEqual({
-      status: "executed",
-      value: receipt(),
-    });
-  });
-
-  it("applies the policy when the locker itself fails", async () => {
-    const clock = fakeClock();
-    const lock: DistributedLock = {
-      acquire: () => Promise.reject(new Error("lock store down")),
-      ping: () => Promise.resolve(),
-      close: () => Promise.resolve(),
-    };
-
-    const closed = makeManager({ clock, lock }).manager;
-    await expect(closed.run(KEY, FINGERPRINT, () => receipt())).rejects.toSatisfy((err) =>
-      isPlatformError(err, IdempotencyErrorCode.storeUnavailable),
-    );
-
-    const open = makeManager({
-      clock,
-      lock,
-      config: { storeFailurePolicy: "fail-open" },
-    }).manager;
-    await expect(open.run(KEY, FINGERPRINT, () => receipt())).resolves.toEqual({
-      status: "executed",
-      value: receipt(),
-    });
+    expect(work).not.toHaveBeenCalled();
   });
 
   it("keeps the store error as the cause, so the operator can see what broke", async () => {

@@ -17,9 +17,11 @@ execution that outlived its claim cannot overwrite whoever re-claimed the key �
 The four outcomes are a discriminated union (`executed` / `replayed` / `in-flight` /
 `fingerprint-mismatch`) rather than thrown sentinels: they are expected control flow, and this
 matches the repo's optional-over-sentinels stance. Thrown `PlatformError`s are reserved for
-genuine failures. Store failure is `fail-closed` by default, `fail-open` opt-in, and — diverging
-from platform-go, which applies it to reads only — the policy covers claim writes and lock
-failures too, so `fail-open` means what its name says.
+genuine failures. Store failure is `fail-closed` by default with `fail-open` opt-in, and the
+policy governs **reads only**, as in platform-go: a failed read can be treated as a miss and
+carried on from, while a claim that could not be written leaves the completion nothing to prove
+ownership against, so a failed claim write or an unreachable locker refuses the request under
+either policy.
 
 The package is isomorphic with a deliberately asymmetric split: the browser entry carries key
 minting, fingerprinting, and an `idempotentFetch` wrapper that binds one key to the wrapper (so

@@ -84,12 +84,7 @@ type Claim<T> =
   /** Someone landed a record between the pre-lock read and the lock. */
   | { kind: "existing"; record: IdempotencyRecord<T> }
   /** The claim lock stayed held for the whole wait — someone else is claiming this key now. */
-  | { kind: "contended" }
-  /** The store or the locker failed and the policy is fail-open: run the work unprotected. */
-  | { kind: "unprotected" };
-
-/** Sentinel for "the store failed and we are failing open" on a read. */
-const FAILED_OPEN = Symbol("failed-open");
+  | { kind: "contended" };
 
 const defaultIdentifiers = provideIdentifierGenerator();
 
@@ -165,9 +160,8 @@ export class IdempotencyManager<T> {
    * survives and correctly refuses the retry until it expires.
    *
    * An error thrown by `fn` propagates unchanged and the claim is released, so the next attempt
-   * runs the work again. An unusable key, an empty fingerprint, or an unreachable store under
-   * `fail-closed` throw a {@link PlatformError}; the four ordinary outcomes are returned, not
-   * thrown.
+   * runs the work again. An unusable key, an empty fingerprint, or an unreachable store throw a
+   * {@link PlatformError}; the four ordinary outcomes are returned, not thrown.
    */
   run(
     key: IdempotencyKey,
@@ -195,7 +189,7 @@ export class IdempotencyManager<T> {
       // Read before locking. The overwhelmingly common case is a replay of a completed record,
       // and it costs one round trip with no coordination at all.
       const existing = await this.#load(op, storeKey);
-      if (existing !== undefined && existing !== FAILED_OPEN) {
+      if (existing !== undefined) {
         return this.#resolve(op, existing, fingerprint);
       }
 
@@ -211,29 +205,17 @@ export class IdempotencyManager<T> {
           this.#count("in_flight");
           return { status: "in-flight" };
         case "claimed":
-        case "unprotected":
           break;
       }
 
-      const claimId = claim.kind === "claimed" ? claim.claimId : undefined;
+      const { claimId } = claim;
 
       let value: T;
       try {
         value = await fn();
       } catch (err) {
-        if (claimId !== undefined) {
-          await this.#release(op, storeKey, claimId);
-        }
+        await this.#release(op, storeKey, claimId);
         throw err;
-      }
-
-      if (claimId === undefined) {
-        // Ran without a claim under fail-open: there is no claim to complete, and writing a
-        // record now would pin a result the store could not be trusted to guard in the first
-        // place.
-        op.set("idempotency.recorded", false);
-        this.#count("executed");
-        return { status: "executed", value };
       }
 
       if (!this.#recordable(value)) {
@@ -305,9 +287,6 @@ export class IdempotencyManager<T> {
         this.#lockKey(key),
         async () => {
           const existing = await this.#load(op, storeKey);
-          if (existing === FAILED_OPEN) {
-            return { kind: "unprotected" };
-          }
           if (existing !== undefined) {
             return { kind: "existing", record: existing };
           }
@@ -343,19 +322,17 @@ export class IdempotencyManager<T> {
       if (isPlatformError(err, IdempotencyErrorCode.storeUnavailable)) {
         throw err;
       }
-      // Either the locker itself failed or the claim write did. Both are the store being
-      // unreachable, so both go through the same policy the read does — otherwise `fail-open`
-      // would be a promise this package keeps only for reads.
+      // Either the locker failed or the claim write did, and neither consults the store-failure
+      // policy: it governs *reads* only. A read can fail open because "no record" is a coherent
+      // (if unprotected) answer to carry on from; a claim that could not be written leaves
+      // nothing for the completion to prove ownership against, so there is no state in which
+      // running the work is a defensible guess. platform-go draws the line in the same place.
       this.#instruments.storeErrors.add(1);
-      if (!this.#failOpen) {
-        throw new PlatformError(
-          IdempotencyErrorCode.storeUnavailable,
-          `claiming idempotency key: ${messageOf(err)}`,
-          { cause: err },
-        );
-      }
-      op.acknowledge(err, "claiming idempotency key, failing open");
-      return { kind: "unprotected" };
+      throw new PlatformError(
+        IdempotencyErrorCode.storeUnavailable,
+        `claiming idempotency key: ${messageOf(err)}`,
+        { cause: err },
+      );
     }
 
     return attempt.acquired ? attempt.value : { kind: "contended" };
@@ -433,7 +410,7 @@ export class IdempotencyManager<T> {
     claimId: string,
     action: string,
   ): Promise<boolean> {
-    let record: IdempotencyRecord<T> | typeof FAILED_OPEN | undefined;
+    let record: IdempotencyRecord<T> | undefined;
     try {
       record = await this.#load(op, storeKey);
     } catch (err) {
@@ -441,10 +418,10 @@ export class IdempotencyManager<T> {
       op.acknowledge(err, `reading idempotency claim before ${action}`);
       return false;
     }
-    if (record === FAILED_OPEN) {
-      return false;
-    }
 
+    // A read that failed open arrives here as `undefined` and is therefore counted as a lost
+    // claim. That is the honest reading: we could not confirm the claim is ours, and the write
+    // is skipped for the same reason it would be if someone else had taken it.
     if (record?.claimId !== claimId) {
       this.#instruments.claimsLost.add(1);
       op.logger().warn(
@@ -461,14 +438,17 @@ export class IdempotencyManager<T> {
    * Reads a record, reporting `undefined` when there is nothing usable to this build.
    *
    * A record written by a different version reads as absent rather than as an error: with a
-   * day-long TTL, failing on it would turn one bad deploy into a day of failures. A store failure
-   * is the case the policy exists for — `fail-closed` throws, `fail-open` reports
-   * {@link FAILED_OPEN} so the caller can tell "nothing recorded" from "we could not look".
+   * day-long TTL, failing on it would turn one bad deploy into a day of failures.
+   *
+   * **This is the only place the store-failure policy applies.** `fail-closed` throws;
+   * `fail-open` reports the read as a miss and carries on, which is what trades the guarantee for
+   * availability. The two are indistinguishable to the caller by design — "nothing recorded" is
+   * exactly the answer fail-open elects to proceed from.
    */
   async #load(
     op: Operation,
     storeKey: string,
-  ): Promise<IdempotencyRecord<T> | typeof FAILED_OPEN | undefined> {
+  ): Promise<IdempotencyRecord<T> | undefined> {
     let record: IdempotencyRecord<T> | undefined;
     try {
       record = await this.#store.get(storeKey);
@@ -482,7 +462,7 @@ export class IdempotencyManager<T> {
         );
       }
       op.acknowledge(err, "reading idempotency record, failing open");
-      return FAILED_OPEN;
+      return undefined;
     }
 
     if (record === undefined) {
