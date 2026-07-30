@@ -26,6 +26,14 @@ function countingMeter(): { deps: ObservabilityDeps; counts: Map<string, number>
   return { deps: { metrics: provider }, counts };
 }
 
+/** A TTL short enough to expire mid-test, and a wait comfortably past it. */
+const SHORT_TTL_MS = 10;
+const PAST_SHORT_TTL_MS = 50;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Provider-agnostic conformance suite. Running the same assertions against multiple
  * providers proves the `Cache<T>` interface is implementation-independent.
@@ -51,6 +59,32 @@ function conformance(
       await cache.set("k", 1);
       await cache.delete("k");
       expect(await cache.get("k")).toBeUndefined();
+    });
+
+    it("expires an entry written with a per-entry ttl", async () => {
+      const cache = make();
+      await cache.set("k", 1, { ttlMs: SHORT_TTL_MS });
+      await sleep(PAST_SHORT_TTL_MS);
+      expect(await cache.get("k")).toBeUndefined();
+    });
+
+    // The reason this issue exists: an idempotency claim (minutes) and its result record (a day)
+    // are written through one cache instance, so a single cache-wide expiry cannot express them.
+    it("keeps two entries with different ttls independent", async () => {
+      const cache = make();
+      await cache.set("claim", 1, { ttlMs: SHORT_TTL_MS });
+      await cache.set("record", 2, { ttlMs: 60_000 });
+      await sleep(PAST_SHORT_TTL_MS);
+
+      expect(await cache.get("claim")).toBeUndefined();
+      expect(await cache.get("record")).toBe(opts.persists ? 2 : undefined);
+    });
+
+    it("leaves an entry alone when no ttl is given and the cache configures none", async () => {
+      const cache = make();
+      await cache.set("k", 1);
+      await sleep(PAST_SHORT_TTL_MS);
+      expect(await cache.get("k")).toBe(opts.persists ? 1 : undefined);
     });
 
     it("pings without throwing", async () => {
@@ -122,6 +156,41 @@ describe("InMemoryCache eviction (CACHE-2)", () => {
     for (let i = 0; i < 50; i++) await cache.set(`k${String(i)}`, i);
     expect(await cache.get("k0")).toBe(0);
     expect(await cache.get("k49")).toBe(49);
+  });
+});
+
+describe("InMemoryCache per-entry TTL", () => {
+  it("overrides a shorter configured expiry", async () => {
+    const cache = new InMemoryCache<number>({ expiryMs: SHORT_TTL_MS });
+    await cache.set("k", 1, { ttlMs: 60_000 });
+    await sleep(PAST_SHORT_TTL_MS);
+    expect(await cache.get("k")).toBe(1);
+  });
+
+  // The documented rule: non-positive means "ignore me", NOT "never expire". Asserting both
+  // values pins the choice, since the opposite reading is equally defensible in the abstract.
+  it.each([0, -1])(
+    "falls back to the configured expiry when ttlMs is %i",
+    async (ttlMs) => {
+      const cache = new InMemoryCache<number>({ expiryMs: SHORT_TTL_MS });
+      await cache.set("k", 1, { ttlMs });
+      await sleep(PAST_SHORT_TTL_MS);
+      expect(await cache.get("k")).toBeUndefined();
+    },
+  );
+
+  it("applies one ttl across a setMany batch", async () => {
+    const cache = new InMemoryCache<number>();
+    await cache.setMany(
+      new Map([
+        ["a", 1],
+        ["b", 2],
+      ]),
+      { ttlMs: SHORT_TTL_MS },
+    );
+    expect(await cache.get("a")).toBe(1);
+    await sleep(PAST_SHORT_TTL_MS);
+    expect(await cache.getMany(["a", "b"])).toStrictEqual(new Map());
   });
 });
 

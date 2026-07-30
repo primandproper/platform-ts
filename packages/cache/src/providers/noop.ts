@@ -6,6 +6,7 @@ export class NoopCache<T> implements Cache<T> {
     return Promise.resolve(undefined);
   }
 
+  /** Accepts (and discards) a per-entry TTL along with the value — nothing is stored to expire. */
   set(): Promise<void> {
     return Promise.resolve();
   }

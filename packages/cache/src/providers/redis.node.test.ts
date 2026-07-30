@@ -5,6 +5,8 @@ import { RedisCache } from "./redis.node.js";
 const h = vi.hoisted(() => ({
   store: new Map<string, string>(),
   del: vi.fn<(key: string | string[]) => void>(),
+  /** Records the full argument list of every SET, so TTL flags can be asserted. */
+  set: vi.fn<(...args: unknown[]) => void>(),
   quit: vi.fn<() => Promise<"OK">>(() => Promise.resolve("OK")),
   disconnect: vi.fn<() => void>(),
 }));
@@ -26,7 +28,9 @@ vi.mock("ioredis", () => {
       }
       return Promise.resolve(count);
     }
-    set(): Promise<"OK"> {
+    set(key: string, value: string, ...rest: unknown[]): Promise<"OK"> {
+      h.set(key, value, ...rest);
+      h.store.set(key, value);
       return Promise.resolve("OK");
     }
     pipeline(): {
@@ -35,7 +39,8 @@ vi.mock("ioredis", () => {
     } {
       const queued: [string, string][] = [];
       const p = {
-        set: (key: string, value: string): unknown => {
+        set: (key: string, value: string, ...rest: unknown[]): unknown => {
+          h.set(key, value, ...rest);
           queued.push([key, value]);
           return p;
         },
@@ -133,6 +138,62 @@ describe("RedisCache batching (PERF-1)", () => {
     await expect(cache.setMany(new Map([["k", circular]]))).rejects.toThrow(
       /failed to encode value for k/,
     );
+  });
+});
+
+describe("RedisCache per-entry TTL", () => {
+  it("sends no expiry flag when neither a default nor an override is set", async () => {
+    h.set.mockClear();
+    const cache = new RedisCache<number>({ url: "redis://x" });
+
+    await cache.set("k", 1);
+
+    expect(h.set).toHaveBeenCalledWith("k", "1");
+  });
+
+  it("sends the configured default expiry as PX milliseconds", async () => {
+    h.set.mockClear();
+    const cache = new RedisCache<number>({ url: "redis://x", expiryMs: 60_000 });
+
+    await cache.set("k", 1);
+
+    expect(h.set).toHaveBeenCalledWith("k", "1", "PX", 60_000);
+  });
+
+  // PX rather than EX: the interface is denominated in milliseconds, and EX would round this
+  // 1500ms TTL up to a whole 2s.
+  it("sends a per-entry override at millisecond precision", async () => {
+    h.set.mockClear();
+    const cache = new RedisCache<number>({ url: "redis://x", expiryMs: 60_000 });
+
+    await cache.set("k", 1, { ttlMs: 1500 });
+
+    expect(h.set).toHaveBeenCalledWith("k", "1", "PX", 1500);
+  });
+
+  it("falls back to the configured expiry when ttlMs is non-positive", async () => {
+    h.set.mockClear();
+    const cache = new RedisCache<number>({ url: "redis://x", expiryMs: 60_000 });
+
+    await cache.set("k", 1, { ttlMs: 0 });
+
+    expect(h.set).toHaveBeenCalledWith("k", "1", "PX", 60_000);
+  });
+
+  it("applies the prefix and one ttl to every write in a setMany batch", async () => {
+    h.set.mockClear();
+    const cache = new RedisCache<number>({ url: "redis://x", keyPrefix: "p:" });
+
+    await cache.setMany(
+      new Map([
+        ["x", 10],
+        ["y", 20],
+      ]),
+      { ttlMs: 5_000 },
+    );
+
+    expect(h.set).toHaveBeenCalledWith("p:x", "10", "PX", 5_000);
+    expect(h.set).toHaveBeenCalledWith("p:y", "20", "PX", 5_000);
   });
 });
 
