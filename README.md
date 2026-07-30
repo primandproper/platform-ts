@@ -42,6 +42,7 @@ logic, one build), **isomorphic** (same import resolves per-environment), **serv
 | `@primandproper/eventstream`   | `EventStream` over SSE and WebSocket                                    |
 | `@primandproper/analytics`     | `EventReporter` interface with swappable providers                      |
 | `@primandproper/eventcapture`  | Non-blocking high-volume event capture draining to a swappable sink     |
+| `@primandproper/idempotency`   | At-most-once execution per client key (manager on Node, keys in either) |
 
 ### Server-only
 
