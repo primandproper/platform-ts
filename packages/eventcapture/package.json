@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/eventcapture",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "Isomorphic high-volume event capture: a non-blocking recorder draining to a swappable sink.",
   "license": "AGPL-3.0-or-later",
