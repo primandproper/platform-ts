@@ -72,6 +72,18 @@ importers:
         specifier: 3.25.76
         version: 3.25.76
 
+  packages/authorization:
+    dependencies:
+      '@primandproper/errors':
+        specifier: workspace:*
+        version: link:../errors
+      '@primandproper/observability':
+        specifier: workspace:*
+        version: link:../observability
+      zod:
+        specifier: 3.25.76
+        version: 3.25.76
+
   packages/bitmask: {}
 
   packages/cache:

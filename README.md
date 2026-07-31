@@ -29,19 +29,20 @@ logic, one build), **isomorphic** (same import resolves per-environment), **serv
 
 ### Isomorphic
 
-| Package                        | Purpose                                                                 |
-| ------------------------------ | ----------------------------------------------------------------------- |
-| `@primandproper/observability` | `Logger` (pino on Node, console in browser) + OTel tracer/meter aliases |
-| `@primandproper/cache`         | `Cache<T>` (memory/redis on Node, memory/web-storage in browser)        |
-| `@primandproper/cryptography`  | `Encryptor` + `Hasher` over WebCrypto                                   |
-| `@primandproper/random`        | Cryptographically secure random (hex, base32, base64url) over WebCrypto |
-| `@primandproper/compression`   | `Compressor` interface with swappable providers                         |
-| `@primandproper/cookies`       | `CookieStore` interface with swappable providers                        |
-| `@primandproper/httpclient`    | Thin `fetch` wrapper with OpenTelemetry spans                           |
-| `@primandproper/ratelimiting`  | `RateLimiter` interface with swappable providers                        |
-| `@primandproper/eventstream`   | `EventStream` over SSE and WebSocket                                    |
-| `@primandproper/analytics`     | `EventReporter` interface with swappable providers                      |
-| `@primandproper/eventcapture`  | Non-blocking high-volume event capture draining to a swappable sink     |
+| Package                        | Purpose                                                                   |
+| ------------------------------ | ------------------------------------------------------------------------- |
+| `@primandproper/observability` | `Logger` (pino on Node, console in browser) + OTel tracer/meter aliases   |
+| `@primandproper/cache`         | `Cache<T>` (memory/redis on Node, memory/web-storage in browser)          |
+| `@primandproper/cryptography`  | `Encryptor` + `Hasher` over WebCrypto                                     |
+| `@primandproper/random`        | Cryptographically secure random (hex, base32, base64url) over WebCrypto   |
+| `@primandproper/compression`   | `Compressor` interface with swappable providers                           |
+| `@primandproper/cookies`       | `CookieStore` interface with swappable providers                          |
+| `@primandproper/httpclient`    | Thin `fetch` wrapper with OpenTelemetry spans                             |
+| `@primandproper/ratelimiting`  | `RateLimiter` interface with swappable providers                          |
+| `@primandproper/eventstream`   | `EventStream` over SSE and WebSocket                                      |
+| `@primandproper/analytics`     | `EventReporter` interface with swappable providers                        |
+| `@primandproper/eventcapture`  | Non-blocking high-volume event capture draining to a swappable sink       |
+| `@primandproper/authorization` | Synchronous permission checks everywhere, policy resolution on the server |
 
 ### Server-only
 

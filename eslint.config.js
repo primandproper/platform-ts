@@ -80,6 +80,17 @@ export default tseslint.config(
     },
   },
   {
+    // authorization is isomorphic and, unusually, every module in it is portable: the whole
+    // checking half ships to the browser, and even the static resolver runs without I/O. Only
+    // the split of what each entry point re-exports keeps resolution server-side, so the ban
+    // applies to the package as a whole rather than to a `*.node.ts` subset.
+    files: ["packages/authorization/src/**/*.ts"],
+    ignores: ["packages/authorization/src/**/*.test.ts"],
+    rules: {
+      "no-restricted-imports": ["error", nodeBuiltinBan],
+    },
+  },
+  {
     files: ["**/*.test.ts"],
     rules: {
       "@typescript-eslint/no-non-null-assertion": "off",
