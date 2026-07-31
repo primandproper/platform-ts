@@ -1,5 +1,12 @@
 # @primandproper/secrets
 
+## 0.0.3
+
+### Patch Changes
+
+- Updated dependencies [3d5baf6]
+  - @primandproper/cache@0.2.0
+
 ## 0.0.2
 
 ### Patch Changes

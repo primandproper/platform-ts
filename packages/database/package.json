@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/database",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Server-only instrumented database pools: a thin observability + lifecycle layer over a driver pool, for Drizzle/Kysely/raw SQL.",
   "license": "AGPL-3.0-or-later",

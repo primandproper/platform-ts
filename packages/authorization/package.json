@@ -1,6 +1,6 @@
 {
   "name": "@primandproper/authorization",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "Isomorphic authorization: synchronous permission checks everywhere, pluggable policy resolution on the server.",
   "license": "AGPL-3.0-or-later",
