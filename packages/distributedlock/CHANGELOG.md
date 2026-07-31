@@ -1,5 +1,12 @@
 # @primandproper/distributedlock
 
+## 0.1.1
+
+### Patch Changes
+
+- Updated dependencies [8728114]
+  - @primandproper/database@0.2.0
+
 ## 0.1.0
 
 ### Minor Changes
