@@ -74,16 +74,89 @@ quantifier, and it is a live hazard: a requirement list that accidentally resolv
 permissions would authorize everyone. The set algebra stays honest and each declaration site
 guards, which means the sites answer the empty case differently **on purpose**:
 
-| site                                         | empty list                                    |
-| -------------------------------------------- | --------------------------------------------- |
-| `PermissionSet.hasAll()` / `Grants.hasAll()` | `true` — set algebra                          |
-| server enforcement middleware                | denies — far more likely a bug than an intent |
-| a frozen requirements table                  | refuses to build at all                       |
+| site                                            | empty list                                    |
+| ----------------------------------------------- | --------------------------------------------- |
+| `PermissionSet.hasAll()` / `Grants.hasAll()`    | `true` — set algebra                          |
+| `Enforcer.decide()` / `require()` / `enforce()` | denies — far more likely a bug than an intent |
+| `RequirementsBuilder.build()`                   | refuses to build at all                       |
 
 "Empty means allow" is therefore only ever safe with a list you wrote **literally**. Anything
-derived from configuration, a database, or a lookup must be checked for emptiness first. The last
-two rows describe the enforcement layer, which is not ported yet — see "Not ported" below — so
-today that check is the caller's job.
+derived from configuration, a database, or a lookup should reach an `Enforcer` rather than
+`hasAll` directly, because the enforcement layer is where that check already lives.
+
+## Server enforcement (server only)
+
+An `Enforcer` decides whether a request may proceed and says so by throwing. The decision is still
+just `Grants.hasAll` — what the enforcer adds is the part that is easy to get wrong exactly once:
+the empty-list guard above, fail-closed behaviour for a route nobody declared, and instruments
+that tell "a caller overreached" apart from "this service is not enforcing what its author thought
+it was".
+
+Two ways to declare what a route needs, and they are the two platform-go ships:
+
+```ts
+const enforcer = newEnforcer({
+  extract: (c) => c.get("grants"),
+  deps: { logger, metrics },
+});
+
+// At the registration site — the requirement sits next to the handler it guards.
+app.get("/recipes/:id", enforcer.require("recipes.read"), readRecipe);
+```
+
+```ts
+// Or from a frozen table, installed once. An undeclared route is denied.
+const requirements = newRequirements()
+  .require("GET /recipes/:id", "recipes.read")
+  .markPublic("GET /healthz")
+  .build();
+
+const enforcer = newEnforcer({ extract, requirements });
+app.use(enforcer.enforce((c) => `${c.req.method} ${c.req.routePath}`));
+```
+
+Middleware is `(ctx, next)` — hono- and koa-shaped, generic over the context type, with an express
+adapter shown in the `Middleware` doc comment. A denial **throws** `PermissionDeniedError` rather
+than writing a response: this package cannot know a consumer's error envelope and should not guess
+at one, and routing the denial through the framework's own error hook is what makes it look
+identical to a handler that threw the same error itself.
+
+### The table is the stronger of the two
+
+Declaring at the registration site puts the requirement next to the handler, which is where a
+reader is most likely to notice its absence — but nothing can detect a route registered with no
+guard at all. platform-go says so plainly and stops there, because its HTTP middleware runs before
+the mux has matched and a route pattern is not knowable at that point.
+
+TypeScript is not stuck with that. The route table is enumerable at startup, so the check Go lists
+as its known gap is one call:
+
+```ts
+assertRoutesDeclared(
+  app.routes.map((r) => `${r.method} ${r.path}`),
+  requirements,
+); // throws RouteCoverageError naming every uncovered route
+```
+
+Run it at boot and in a test. It reports a rename from both sides — the new name as undeclared, the
+old one as stale — which names the mistake far more precisely than either half alone.
+
+### Rolling it out
+
+`auditOnly: true` evaluates and records every decision but denies nothing. Turning enforcement on
+across a service that never had it is otherwise a bet that every declaration is right on the first
+try: deploy with it, watch `authorization.denials` and `authorization.undeclared` settle to zero,
+then remove it. It is the only mode in which an unauthorized request proceeds, which is why it is a
+code-level option rather than configuration, and why it announces itself in the log at
+construction.
+
+### Watching it
+
+`authorization.checks`, `authorization.denials`, `authorization.missing_grants`,
+`authorization.undeclared`, and `authorization.empty_requirements`, each carrying the declared
+route key when enforcement was table-driven. Alert on the last three: they mean the wiring is
+wrong, not that a caller misbehaved. The key is a declared route pattern, so its cardinality is
+bounded by the table — a raw URL path is not, and is never used as a label.
 
 ## Policy resolution (server only)
 
@@ -123,7 +196,7 @@ say) owes a test asserting it agrees with this function.
 ## The isomorphic split
 
 - `index.browser.ts` — permission sets, grants, and errors: the checking half.
-- `index.node.ts` — the same, plus policy resolution.
+- `index.node.ts` — the same, plus policy resolution and enforcement.
 
 Resolution is absent from the browser rather than stubbed. It may do I/O and belongs to the
 server, which hands the browser the resolved set; a browser that could resolve policy would be a
@@ -146,12 +219,7 @@ adding context at a boundary does not turn a denial into a 500.
 
 ## Not ported
 
-- **Server enforcement** — the middleware that denies an empty requirement list, and the frozen
-  requirements table that refuses to build one. TypeScript has a real opportunity here that Go
-  lacked: with hono/express/fastify the route table is enumerable at startup, so a boot-time check
-  that every registered route either declares permissions or is explicitly marked public is
-  achievable.
 - **A database-backed resolver**, and the cached-resolver wrapper `PolicyInvalidator` exists for.
-- **A `config.ts` provider factory** — resolvers are constructed directly for now.
+- **A `config.ts` provider factory** — resolvers and enforcers are constructed directly for now.
 
 Tracked in [#9](https://github.com/primandproper/platform-ts/issues/9).
