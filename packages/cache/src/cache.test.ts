@@ -143,12 +143,22 @@ describe("InMemoryCache eviction (CACHE-2)", () => {
   });
 
   it("sweeps expired entries before evicting live ones", async () => {
-    const cache = new InMemoryCache<number>({ maxEntries: 2, expiryMs: 1 });
-    await cache.set("a", 1);
-    await cache.set("b", 2);
-    await new Promise((r) => setTimeout(r, 5)); // let a and b expire
-    await cache.set("c", 3); // sweep reclaims a+b, no live eviction needed
-    expect(await cache.get("c")).toBe(3);
+    // Only the doomed entry carries a TTL, via the per-entry override; the cache itself has no
+    // configured expiry. A cache-wide `expiryMs: 1` would put the assertions on a 1ms fuse of
+    // their own — the entry under test could lapse between its write and its read on a loaded
+    // runner — and nothing about this behaviour needs the survivors to be perishable.
+    const cache = new InMemoryCache<number>({ maxEntries: 2 });
+    await cache.set("live", 1);
+    await cache.set("doomed", 2, { ttlMs: 1 });
+    await new Promise((r) => setTimeout(r, 5)); // let "doomed" lapse
+
+    await cache.set("fresh", 3); // at the cap: sweeping "doomed" makes room
+
+    // "live" is the load-bearing assertion. It is the oldest-inserted entry, so an eviction that
+    // did not sweep first would take it — sweeping is the only reason it survives.
+    expect(await cache.get("live")).toBe(1);
+    expect(await cache.get("fresh")).toBe(3);
+    expect(await cache.get("doomed")).toBeUndefined();
   });
 
   it("stays unbounded when maxEntries is 0", async () => {
