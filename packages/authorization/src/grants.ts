@@ -46,9 +46,8 @@ export class Grants {
    * Calling it with no permissions is vacuously `true`, so a list that reached zero length by
    * accident authorizes everyone. {@link PermissionSet.hasAll} carries the full matrix of which
    * declaration sites guard the empty case and how — read it before calling this from anything
-   * that decides access. Code deciding access from a *derived* list must reject the empty case
-   * itself before calling this, since the enforcement layer that would otherwise do it is not
-   * ported yet.
+   * that decides access. Code deciding access from a *derived* list should route it through an
+   * `Enforcer` instead, which denies the empty case rather than vacuously allowing it.
    */
   hasAll(perms: Iterable<Permission>): boolean {
     for (const p of perms) {

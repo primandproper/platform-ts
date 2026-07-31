@@ -56,16 +56,12 @@ export class PermissionSet {
    * | site | empty list |
    * | --- | --- |
    * | `PermissionSet.hasAll()` / `Grants.hasAll()` | `true` — set algebra |
-   * | server enforcement middleware | denies — an empty list is far more likely a bug |
-   * | a frozen requirements table | refuses to build at all |
+   * | `Enforcer.decide()` / `require()` / `enforce()` | denies — an empty list is far more likely a bug |
+   * | `RequirementsBuilder.build()` | refuses to build at all |
    *
    * "Empty means allow" is therefore only ever safe with a list you wrote literally. Anything
-   * derived from configuration, a database, or a lookup must be checked for emptiness before it
-   * reaches here.
-   *
-   * **The last two rows describe an enforcement layer this package does not ship yet** — see
-   * "Not ported" in the README. Until it lands, guarding a derived list is the caller's job, and
-   * this is the hazard to guard against.
+   * derived from configuration, a database, or a lookup should reach an `Enforcer` rather than
+   * this method, because the enforcement layer is where that check already lives.
    */
   hasAll(perms: Iterable<Permission>): boolean {
     for (const p of perms) {
