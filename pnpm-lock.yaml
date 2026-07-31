@@ -72,6 +72,18 @@ importers:
         specifier: 3.25.76
         version: 3.25.76
 
+  packages/authorization:
+    dependencies:
+      '@primandproper/errors':
+        specifier: workspace:*
+        version: link:../errors
+      '@primandproper/observability':
+        specifier: workspace:*
+        version: link:../observability
+      zod:
+        specifier: 3.25.76
+        version: 3.25.76
+
   packages/bitmask: {}
 
   packages/cache:
@@ -294,6 +306,30 @@ importers:
       '@primandproper/retry':
         specifier: workspace:*
         version: link:../retry
+      zod:
+        specifier: 3.25.76
+        version: 3.25.76
+
+  packages/idempotency:
+    dependencies:
+      '@primandproper/cache':
+        specifier: workspace:*
+        version: link:../cache
+      '@primandproper/cryptography':
+        specifier: workspace:*
+        version: link:../cryptography
+      '@primandproper/distributedlock':
+        specifier: workspace:*
+        version: link:../distributedlock
+      '@primandproper/errors':
+        specifier: workspace:*
+        version: link:../errors
+      '@primandproper/identifiers':
+        specifier: workspace:*
+        version: link:../identifiers
+      '@primandproper/observability':
+        specifier: workspace:*
+        version: link:../observability
       zod:
         specifier: 3.25.76
         version: 3.25.76

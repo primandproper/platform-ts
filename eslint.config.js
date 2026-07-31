@@ -80,6 +80,33 @@ export default tseslint.config(
     },
   },
   {
+    // idempotency is isomorphic with an asymmetric split: the client half (key minting,
+    // fingerprints, the fetch wrapper) ships to the browser, while the manager is `*.node.ts`
+    // because it needs a record store and a distributed lock. The server-only packages are
+    // banned alongside the Node built-ins so the shared core cannot quietly grow an import that
+    // would drag a Redis client into a browser bundle.
+    files: ["packages/idempotency/src/**/*.ts"],
+    ignores: [
+      "packages/idempotency/src/**/*.node.ts",
+      "packages/idempotency/src/**/*.test.ts",
+    ],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            ...nodeBuiltinBan.patterns,
+            {
+              group: ["@primandproper/distributedlock", "@primandproper/database"],
+              message:
+                "Server-only packages belong in idempotency's `*.node.ts` half — the rest of this package ships to the browser.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ["**/*.test.ts"],
     rules: {
       "@typescript-eslint/no-non-null-assertion": "off",
